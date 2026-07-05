@@ -97,62 +97,16 @@ python main.py
 
 ## 🤝 参与贡献
 
-欢迎通过 Issue 提交建议或 PR 贡献代码，请遵循 [贡献指南](https://contributing.md/)
+欢迎通过 Issue 提交建议或 PR 贡献代码。
 
-## 🧸特别鸣谢
-本项目参考了以下开源项目：
-https://github.com/cv-cat/XianYuApis
+## 📖 项目说明
 
-感谢<a href="https://github.com/cv-cat">@CVcat</a>的技术支持
+本项目基于 [XianYuApis](https://github.com/cv-cat/XianYuApis) 进行二次开发，在原项目基础上增加了多 Agent 协作、上下文持久化管理、Docker 部署支持等功能。
 
-## 🛡 注意事项
+本项目仅供学习与技术交流使用。
 
-⚠️ 注意：**本项目仅供学习与交流，如有侵权联系作者删除。**
+## 📄 License
 
-鉴于项目的特殊性，开发团队可能在任何时间**停止更新**或**删除项目**。
-
-如需学习交流，请联系：[coderxiu@qq.com](https://mailto:coderxiu@qq.com/)
-
-## 📱 交流群
-欢迎加入项目交流群，交流技术、分享经验、互助学习。
-<div align="center">
-  <table>
-    <tr>
-      <td align="center"><strong>交流群26（已满200）</strong></td>
-      <td align="center"><strong>交流群27（推荐加入）</strong></td>
-    </tr>
-    <tr>
-      <td><img src="./images/wx_group26.png" width="300px" alt="交流群26"></td>
-      <td><img src="./images/wx_group27.png" width="300px" alt="交流群27"></td>
-    </tr>
-  </table>
-</div>
-
-## 💼 寻找机会
-
-### <a href="https://github.com/shaxiu">@Shaxiu</a>
-**🔍寻求方向**：**AI产品经理**  
-**📫 联系：** **email**:coderxiu@qq.com；**wx:** coderxiu
-
-### <a href="https://github.com/cv-cat">@CVcat</a>
-**🔍寻求方向**：**研发工程师**（python、java、逆向、爬虫）  
-**📫 联系：** **email:** 992822653@qq.com；**wx:** CVZC15751076989
-## ☕ 请喝咖啡
-您的☕和⭐将助力项目持续更新：
-
-<div align="center">
-  <img src="./images/wechat_pay.jpg" width="400px" alt="微信赞赏码"> 
-  <img src="./images/alipay.jpg" width="400px" alt="支付宝收款码">
-</div>
-
-
-## 📈 Star 趋势
-<a href="https://www.star-history.com/#shaxiu/XianyuAutoAgent&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=shaxiu/XianyuAutoAgent&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=shaxiu/XianyuAutoAgent&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=shaxiu/XianyuAutoAgent&type=Date" />
- </picture>
-</a>
+MIT License — 参见 [LICENSE](LICENSE) 文件
 
 
