@@ -10,7 +10,7 @@
 
 当前版本保留原项目的闲鱼 WebSocket 长连接能力，并新增本地 Mock CLI、SQLite 价格承诺记忆、硬规则议价护栏、JSON 商品知识库和针对核心策略的自动化测试。
 
-仓库地址：[https://github.com/falses00/XianyuAutoAgent](https://github.com/falses00/XianyuAutoAgent)
+仓库地址：[https://github.com/falses00/Falses-Goofish-GuardAgent](https://github.com/falses00/Falses-Goofish-GuardAgent)
 
 ## 为什么叫 GuardAgent
 
@@ -82,7 +82,7 @@ python main.py --mode xianyu
 ## 项目结构
 
 ```text
-XianyuAutoAgent/
+Falses-Goofish-GuardAgent/
 ├── main.py                     # 启动入口：xianyu / cli 两种模式
 ├── XianyuAgent.py              # 意图路由、价格 Agent、详情 Agent、默认 Agent
 ├── XianyuApis.py               # 闲鱼 / Goofish API 与 WebSocket 封装
@@ -109,8 +109,8 @@ XianyuAutoAgent/
 ### 1. 克隆项目
 
 ```bash
-git clone https://github.com/falses00/XianyuAutoAgent.git
-cd XianyuAutoAgent
+git clone https://github.com/falses00/Falses-Goofish-GuardAgent.git
+cd Falses-Goofish-GuardAgent
 ```
 
 ### 2. 安装依赖

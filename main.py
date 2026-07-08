@@ -874,7 +874,7 @@ if __name__ == '__main__':
     import sys
 
     # 1. 解析启动命令行参数
-    parser = argparse.ArgumentParser(description="Falses Goofish GuardAgent (XianyuAutoAgent 深度二开版)")
+    parser = argparse.ArgumentParser(description="Falses Goofish GuardAgent 深度二开版")
     parser.add_argument(
         "--mode",
         type=str,
