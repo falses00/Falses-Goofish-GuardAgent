@@ -16,14 +16,14 @@ class XianyuReplyBot:
     重构升级后的闲鱼智能回复 Bot。
     保持原有外部调用接口不变，内部注入多智能体专家协同、议价安全护栏 (Guardrails) 与 SQLite 持久化会话记忆。
     """
-    def __init__(self):
+    def __init__(self, client=None, db_path=None):
         # 初始化 OpenAI 客户端
-        self.client = OpenAI(
+        self.client = client or OpenAI(
             api_key=os.getenv("API_KEY"),
             base_url=os.getenv("MODEL_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
         )
         # 初始化持久化数据库管理器，用于跟踪报价承诺
-        self.db = ChatContextManager()
+        self.db = ChatContextManager(db_path=db_path or os.getenv("CHAT_DB_PATH", "data/chat_history.db"))
 
         self._init_system_prompts()
         self._init_agents()
@@ -148,7 +148,7 @@ class IntentRouter:
             },
             'price': { # 砍价意图判定
                 'keywords': ['便宜', '价', '砍价', '少点', '大刀', '抹零', '邮费', '少个邮费'],
-                'patterns': [r'\d+元', r'能少\d+', r'包邮']
+                'patterns': [r'\d+元', r'能少\d+', r'\d+(可以|行|出|卖|拍)', r'包邮']
             }
         }
         self.classify_agent = classify_agent

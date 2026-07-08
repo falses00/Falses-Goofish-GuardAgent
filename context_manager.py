@@ -1,8 +1,20 @@
 import sqlite3
 import os
 import json
+from dataclasses import dataclass
 from datetime import datetime
 from loguru import logger
+
+
+@dataclass
+class ChatMemorySnapshot:
+    """A consistent view of one chat's short-term and bargain memory."""
+
+    chat_id: str
+    messages: list
+    bargain_count: int = 0
+    lowest_price_committed: float = None
+    buyer_highest_offer: float = None
 
 
 class ChatContextManager:
@@ -13,7 +25,7 @@ class ChatContextManager:
     支持按会话ID检索对话历史，以及议价次数统计。
     """
 
-    def __init__(self, max_history=100, db_path="data/chat_history.db"):
+    def __init__(self, max_history=100, db_path=None):
         """
         初始化聊天上下文管理器
 
@@ -22,8 +34,24 @@ class ChatContextManager:
             db_path: SQLite数据库文件路径
         """
         self.max_history = max_history
-        self.db_path = db_path
+        self.db_path = db_path or os.getenv("CHAT_DB_PATH", "data/chat_history.db")
         self._init_db()
+
+    def _trim_messages_by_chat(self, cursor, chat_id):
+        """Keep only the latest max_history messages for one chat."""
+        cursor.execute(
+            """
+            DELETE FROM messages
+            WHERE chat_id = ?
+              AND id NOT IN (
+                SELECT id FROM messages
+                WHERE chat_id = ?
+                ORDER BY timestamp DESC, id DESC
+                LIMIT ?
+              )
+            """,
+            (chat_id, chat_id, self.max_history)
+        )
 
     def _init_db(self):
         """初始化数据库表结构"""
@@ -196,23 +224,7 @@ class ChatContextManager:
                 (user_id, item_id, role, content, datetime.now().isoformat(), chat_id)
             )
 
-            # 检查是否需要清理旧消息（基于chat_id）
-            cursor.execute(
-                """
-                SELECT id FROM messages
-                WHERE chat_id = ?
-                ORDER BY timestamp DESC
-                LIMIT ?, 1
-                """,
-                (chat_id, self.max_history)
-            )
-
-            oldest_to_keep = cursor.fetchone()
-            if oldest_to_keep:
-                cursor.execute(
-                    "DELETE FROM messages WHERE chat_id = ? AND id < ?",
-                    (chat_id, oldest_to_keep[0])
-                )
+            self._trim_messages_by_chat(cursor, chat_id)
 
             conn.commit()
         except Exception as e:
@@ -221,15 +233,53 @@ class ChatContextManager:
         finally:
             conn.close()
 
-    def get_context_by_chat(self, chat_id):
+    def append_turn(self, chat_id, user_id, item_id, user_text, assistant_id, assistant_text=None, intent=None):
         """
-        基于会话ID获取对话历史
+        Atomically append one user turn, optional assistant reply, and bargain counter update.
 
-        Args:
-            chat_id: 会话ID
+        This avoids half-written memory such as a user message without its assistant reply,
+        or a reply recorded without the matching bargain-count transition.
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        now = datetime.now().isoformat()
 
-        Returns:
-            list: 包含对话历史的列表
+        try:
+            cursor.execute(
+                "INSERT INTO messages (user_id, item_id, role, content, timestamp, chat_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, item_id, "user", user_text, now, chat_id)
+            )
+
+            if assistant_text and assistant_text != "-":
+                cursor.execute(
+                    "INSERT INTO messages (user_id, item_id, role, content, timestamp, chat_id) VALUES (?, ?, ?, ?, ?, ?)",
+                    (assistant_id, item_id, "assistant", assistant_text, datetime.now().isoformat(), chat_id)
+                )
+
+            if intent == "price":
+                cursor.execute(
+                    """
+                    INSERT INTO chat_bargain_counts (chat_id, count, last_updated)
+                    VALUES (?, 1, ?)
+                    ON CONFLICT(chat_id)
+                    DO UPDATE SET count = count + 1, last_updated = ?
+                    """,
+                    (chat_id, datetime.now().isoformat(), datetime.now().isoformat())
+                )
+
+            self._trim_messages_by_chat(cursor, chat_id)
+            conn.commit()
+            logger.debug(f"已原子追加会话轮次: chat_id={chat_id}, intent={intent}")
+        except Exception as e:
+            logger.error(f"追加会话轮次时出错: {e}")
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def get_memory_snapshot(self, chat_id):
+        """
+        Return messages, bargain count, and price commitments in one consistent snapshot.
         """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -244,22 +294,52 @@ class ChatContextManager:
                 """,
                 (chat_id, self.max_history)
             )
-
             messages = [{"role": role, "content": content} for role, content in cursor.fetchall()]
 
-            # 获取议价次数并添加到上下文中
-            bargain_count = self.get_bargain_count_by_chat(chat_id)
-            if bargain_count > 0:
-                messages.append({
-                    "role": "system",
-                    "content": f"议价次数: {bargain_count}"
-                })
+            cursor.execute(
+                """
+                SELECT count, lowest_price_committed, buyer_highest_offer
+                FROM chat_bargain_counts
+                WHERE chat_id = ?
+                """,
+                (chat_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                bargain_count, lowest_price_committed, buyer_highest_offer = row
+            else:
+                bargain_count, lowest_price_committed, buyer_highest_offer = 0, None, None
 
+            return ChatMemorySnapshot(
+                chat_id=chat_id,
+                messages=messages,
+                bargain_count=bargain_count,
+                lowest_price_committed=lowest_price_committed,
+                buyer_highest_offer=buyer_highest_offer,
+            )
         except Exception as e:
-            logger.error(f"获取对话历史时出错: {e}")
-            messages = []
+            logger.error(f"获取会话记忆快照时出错: {e}")
+            return ChatMemorySnapshot(chat_id=chat_id, messages=[])
         finally:
             conn.close()
+
+    def get_context_by_chat(self, chat_id):
+        """
+        基于会话ID获取对话历史
+
+        Args:
+            chat_id: 会话ID
+
+        Returns:
+            list: 包含对话历史的列表
+        """
+        snapshot = self.get_memory_snapshot(chat_id)
+        messages = snapshot.messages
+        if snapshot.bargain_count > 0:
+            messages.append({
+                "role": "system",
+                "content": f"议价次数: {snapshot.bargain_count}"
+            })
 
         return messages
 

@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from core.experts import BargainExpert, FAQExpert
 from context_manager import ChatContextManager
-from XianyuAgent import PriceAgent
+from XianyuAgent import IntentRouter, PriceAgent
 
 def test_bargain_expert_pan_bargain():
     """测试买家没有提出具体价格时的泛议价策略"""
@@ -127,6 +127,15 @@ def test_offer_extraction_ignores_storage_numbers():
     assert offer == 3000
 
 
+def test_price_router_detects_bare_number_offer():
+    """真实买家常说 '4100 可以马上拍'，不能漏到 default。"""
+    router = IntentRouter(classify_agent=None)
+
+    intent = router.detect("4100 可以的话我马上拍", item_desc="", context="")
+
+    assert intent == "price"
+
+
 def test_price_commitment_memory_is_monotonic(tmp_path):
     """价格记忆应保守更新：我方最低承诺取更低值，买家最高出价取更高值。"""
     db_path = tmp_path / "chat_history.db"
@@ -158,3 +167,50 @@ def test_price_commitment_memory_is_monotonic(tmp_path):
 
     assert lowest_committed == 4050
     assert buyer_highest == 4000
+
+
+def test_append_turn_atomically_updates_memory_snapshot(tmp_path):
+    """一轮对话应原子写入用户消息、助手回复和议价次数。"""
+    db_path = tmp_path / "chat_history.db"
+    manager = ChatContextManager(db_path=str(db_path))
+
+    manager.append_turn(
+        "chat_atomic",
+        "buyer",
+        "item_1",
+        "3000 元能出吗",
+        "seller",
+        assistant_text="最低 4149 元",
+        intent="price",
+    )
+
+    snapshot = manager.get_memory_snapshot("chat_atomic")
+
+    assert snapshot.bargain_count == 1
+    assert snapshot.messages == [
+        {"role": "user", "content": "3000 元能出吗"},
+        {"role": "assistant", "content": "最低 4149 元"},
+    ]
+
+
+def test_append_turn_trims_history_by_chat(tmp_path):
+    """超过 max_history 后，只保留当前 chat 的最新消息。"""
+    db_path = tmp_path / "chat_history.db"
+    manager = ChatContextManager(max_history=3, db_path=str(db_path))
+
+    for idx in range(4):
+        manager.append_turn(
+            "chat_trim",
+            "buyer",
+            "item_1",
+            f"消息 {idx}",
+            "seller",
+            assistant_text=None,
+            intent="default",
+        )
+
+    snapshot = manager.get_memory_snapshot("chat_trim")
+
+    assert len(snapshot.messages) == 3
+    assert snapshot.messages[0]["content"] == "消息 1"
+    assert snapshot.messages[-1]["content"] == "消息 3"

@@ -3,6 +3,7 @@ import json
 import asyncio
 import time
 import os
+import re
 import websockets
 from loguru import logger
 from dotenv import load_dotenv, set_key
@@ -518,19 +519,29 @@ class XianyuLive:
             # 检查是否需要回复
             if bot_reply == "-":
                 logger.info(f"[无需回复] 用户 {send_user_name} 的消息被识别为无需回复类型")
+                self.context_manager.append_turn(
+                    chat_id,
+                    send_user_id,
+                    item_id,
+                    send_message,
+                    self.myid,
+                    assistant_text=None,
+                    intent=bot.last_intent
+                )
                 return
 
-            # 添加用户消息到上下文
-            self.context_manager.add_message_by_chat(chat_id, send_user_id, item_id, "user", send_message)
-
-            # 检查是否为价格意图，如果是则增加议价次数
+            self.context_manager.append_turn(
+                chat_id,
+                send_user_id,
+                item_id,
+                send_message,
+                self.myid,
+                assistant_text=bot_reply,
+                intent=bot.last_intent
+            )
             if bot.last_intent == "price":
-                self.context_manager.increment_bargain_count_by_chat(chat_id)
                 bargain_count = self.context_manager.get_bargain_count_by_chat(chat_id)
                 logger.info(f"用户 {send_user_name} 对商品 {item_id} 的议价次数: {bargain_count}")
-
-            # 添加机器人回复到上下文
-            self.context_manager.add_message_by_chat(chat_id, self.myid, item_id, "assistant", bot_reply)
 
             logger.info(f"机器人回复: {bot_reply}")
 
@@ -787,20 +798,18 @@ async def run_cli_mode():
                     chat_id=chat_id
                 )
 
-                # 将用户提问写入 SQLite 上下文
-                bot.db.add_message_by_chat(chat_id, "buyer", "mock_item_001", "user", user_input)
-
-                # 如果判定为价格意图，增加议价次数
-                if bot.last_intent == "price":
-                    bot.db.increment_bargain_count_by_chat(chat_id)
-
-                # 将 AI 回复写入 SQLite 上下文
-                if bot_reply != "-":
-                    bot.db.add_message_by_chat(chat_id, "seller", "mock_item_001", "assistant", bot_reply)
+                bot.db.append_turn(
+                    chat_id,
+                    "buyer",
+                    "mock_item_001",
+                    user_input,
+                    "seller",
+                    assistant_text=None if bot_reply == "-" else bot_reply,
+                    intent=bot.last_intent
+                )
 
             # 读取持久化的决策细节并呈现
-            last_committed, buyer_highest = bot.db.get_price_commitments(chat_id)
-            bargain_count = bot.db.get_bargain_count_by_chat(chat_id)
+            snapshot = bot.db.get_memory_snapshot(chat_id)
             trace = bot.last_trace.to_dict()
             guardrails = "、".join(trace.get("guardrails") or []) or "无"
             price_decision = trace.get("price_decision") or {}
@@ -808,9 +817,9 @@ async def run_cli_mode():
 
             console.print(Panel(
                 f"[bold]识别意图[/bold]: {bot.last_intent}\n"
-                f"[bold]议价次数[/bold]: {bargain_count} 次\n"
+                f"[bold]议价次数[/bold]: {snapshot.bargain_count} 次\n"
                 f"[bold]已启用护栏[/bold]: {guardrails}\n"
-                f"[bold]价格承诺跟踪[/bold]: 我方承诺价格水位 [{last_committed if last_committed else '无'}] 元 | 买家最高出价 [{buyer_highest if buyer_highest else '无'}] 元\n"
+                f"[bold]价格承诺跟踪[/bold]: 我方承诺价格水位 [{snapshot.lowest_price_committed if snapshot.lowest_price_committed else '无'}] 元 | 买家最高出价 [{snapshot.buyer_highest_offer if snapshot.buyer_highest_offer else '无'}] 元\n"
                 f"[bold]定价来源[/bold]: {price_decision.get('price_source', '无')} | [bold]知识命中[/bold]: {knowledge.get('matched', '无')}",
                 title="⚙️ 决策状态监控 (二开新增)",
                 border_style="yellow",
@@ -830,6 +839,90 @@ async def run_cli_mode():
         except (KeyboardInterrupt, EOFError):
             console.print("\n[bold red]程序已强行终止。[/bold red]")
             break
+
+
+class SmokeCompletions:
+    def create(self, model, messages, temperature=0.4, max_tokens=500, top_p=0.8):
+        system_prompt = messages[0]["content"]
+        user_msg = messages[-1]["content"]
+        price_match = re.search(r"最终报价是: 【([0-9.]+)】", system_prompt)
+        if price_match:
+            price = price_match.group(1)
+            content = f"这个价我认真算过了，最低只能到 {price} 元，再低就真的不合适了。"
+        elif "商品知识库真实参数" in system_prompt:
+            content = "这台我按实说：屏幕贴膜使用无划痕，电池健康 93%，配件和发货信息都按商品说明来。"
+        else:
+            content = f"收到，你问的是“{user_msg}”。我这边可以继续帮你确认商品细节。"
+        return type("SmokeResponse", (), {
+            "choices": [type("SmokeChoice", (), {
+                "message": type("SmokeMessage", (), {"content": content})()
+            })()]
+        })()
+
+
+class SmokeChat:
+    def __init__(self):
+        self.completions = SmokeCompletions()
+
+
+class SmokeLLMClient:
+    def __init__(self):
+        self.chat = SmokeChat()
+
+
+def run_smoke_mode():
+    """
+    Deterministic end-to-end runtime smoke test through router, agents, SQLite memory, and trace.
+    """
+    smoke_db_path = os.getenv("SMOKE_DB_PATH", "data/smoke_chat_history.db")
+    bot = XianyuReplyBot(client=SmokeLLMClient(), db_path=smoke_db_path)
+    chat_id = "smoke_chat_001"
+    item_id = "smoke_item_001"
+    bot.db.reset_chat_state(chat_id)
+
+    with open("data/product_info.json", "r", encoding="utf-8") as f:
+        item_info = json.load(f)
+
+    item_description = (
+        f"当前商品的信息如下：标题:{item_info.get('title')} "
+        f"价格:{item_info.get('original_price')}元 详情: {json.dumps(item_info, ensure_ascii=False)}"
+    )
+    buyer_messages = [
+        "这个屏幕有划痕吗，电池健康多少？",
+        "128G 的话，3000 元能出吗？",
+        "4100 可以的话我马上拍",
+    ]
+
+    print("SMOKE_START")
+    for user_input in buyer_messages:
+        context = bot.db.get_context_by_chat(chat_id)
+        reply = bot.generate_reply(user_input, item_description, context=context, chat_id=chat_id)
+        bot.db.append_turn(
+            chat_id,
+            "smoke_buyer",
+            item_id,
+            user_input,
+            "smoke_seller",
+            assistant_text=None if reply == "-" else reply,
+            intent=bot.last_intent
+        )
+        trace = bot.last_trace.to_dict()
+        print(json.dumps({
+            "user": user_input,
+            "reply": reply,
+            "intent": bot.last_intent,
+            "trace": trace,
+        }, ensure_ascii=False))
+
+    snapshot = bot.db.get_memory_snapshot(chat_id)
+    print(json.dumps({
+        "smoke_result": "ok",
+        "messages": len(snapshot.messages),
+        "bargain_count": snapshot.bargain_count,
+        "lowest_price_committed": snapshot.lowest_price_committed,
+        "buyer_highest_offer": snapshot.buyer_highest_offer,
+    }, ensure_ascii=False))
+    print("SMOKE_DONE")
 
 
 def check_and_complete_env():
@@ -879,8 +972,8 @@ if __name__ == '__main__':
         "--mode",
         type=str,
         default="xianyu",
-        choices=["xianyu", "cli"],
-        help="运行模式：xianyu (咸鱼 WebSocket 挂机模式，需 Cookie)；cli (本地命令行交互 Mock 调试)"
+        choices=["xianyu", "cli", "smoke"],
+        help="运行模式：xianyu (咸鱼 WebSocket 挂机模式，需 Cookie)；cli (本地命令行交互 Mock 调试)；smoke (离线端到端自检)"
     )
     args = parser.parse_args()
 
@@ -918,6 +1011,8 @@ if __name__ == '__main__':
 
         # 启动异步本地 CLI 对话终端
         asyncio.run(run_cli_mode())
+    elif args.mode == "smoke":
+        run_smoke_mode()
     else:
         # 挂机长连接模式下，交互式检查并补全 Cookie 和 API_KEY
         check_and_complete_env()

@@ -160,6 +160,14 @@ python main.py --mode cli
 - `3000 卖不卖，我学生`
 - `4100 可以我马上拍`
 
+### 4.1 离线端到端自检
+
+```bash
+python main.py --mode smoke
+```
+
+`smoke` 模式不需要真实 Cookie 或外部 LLM API，会使用内置离线 LLM stub 真实穿过入口、意图路由、Agent、SQLite 记忆、议价护栏、商品知识库和 `AgentTrace`。它适合在提交前快速确认项目能跑通一轮完整买家咨询/砍价流程。
+
 ### 5. 闲鱼挂机运行
 
 在 `.env` 中补充自己的 Cookie：
@@ -190,6 +198,7 @@ pytest tests/test_agents.py -q
 - 商品级 `min_price` 优先于环境折扣。
 - 无效折扣配置自动回退。
 - 规格数字不误判成买家报价。
+- 原子写入一轮对话记忆，避免半轮上下文。
 - 商品知识库关键词命中。
 
 ## 简历项目经历
