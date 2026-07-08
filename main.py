@@ -26,7 +26,7 @@ class XianyuLive:
         self.myid = self.cookies['unb']
         self.device_id = generate_device_id(self.myid)
         self.context_manager = ChatContextManager()
-        
+
         # 心跳相关配置
         self.heartbeat_interval = int(os.getenv("HEARTBEAT_INTERVAL", "15"))  # 心跳间隔，默认15秒
         self.heartbeat_timeout = int(os.getenv("HEARTBEAT_TIMEOUT", "5"))     # 心跳超时，默认5秒
@@ -34,7 +34,7 @@ class XianyuLive:
         self.last_heartbeat_response = 0
         self.heartbeat_task = None
         self.ws = None
-        
+
         # Token刷新相关配置
         self.token_refresh_interval = int(os.getenv("TOKEN_REFRESH_INTERVAL", "3600"))  # Token刷新间隔，默认1小时
         self.token_retry_interval = int(os.getenv("TOKEN_RETRY_INTERVAL", "300"))       # Token重试间隔，默认5分钟
@@ -42,18 +42,18 @@ class XianyuLive:
         self.current_token = None
         self.token_refresh_task = None
         self.connection_restart_flag = False  # 连接重启标志
-        
+
         # 人工接管相关配置
         self.manual_mode_conversations = set()  # 存储处于人工接管模式的会话ID
         self.manual_mode_timeout = int(os.getenv("MANUAL_MODE_TIMEOUT", "3600"))  # 人工接管超时时间，默认1小时
         self.manual_mode_timestamps = {}  # 记录进入人工模式的时间
-        
+
         # 消息过期时间配置
         self.message_expire_time = int(os.getenv("MESSAGE_EXPIRE_TIME", "300000"))  # 消息过期时间，默认5分钟
-        
+
         # 人工接管关键词，从环境变量读取
         self.toggle_keywords = os.getenv("TOGGLE_KEYWORDS", "。")
-        
+
         # 模拟人工输入配置
         self.simulate_human_typing = os.getenv("SIMULATE_HUMAN_TYPING", "False").lower() == "true"
 
@@ -61,7 +61,7 @@ class XianyuLive:
         """刷新token"""
         try:
             logger.info("开始刷新token...")
-            
+
             # 获取新token（如果Cookie失效，get_token会直接退出程序）
             token_result = self.xianyu.get_token(self.device_id)
             if 'data' in token_result and 'accessToken' in token_result['data']:
@@ -73,7 +73,7 @@ class XianyuLive:
             else:
                 logger.error(f"Token刷新失败: {token_result}")
                 return None
-                
+
         except Exception as e:
             logger.error(f"Token刷新异常: {str(e)}")
             return None
@@ -83,11 +83,11 @@ class XianyuLive:
         while True:
             try:
                 current_time = time.time()
-                
+
                 # 检查是否需要刷新token
                 if current_time - self.last_token_refresh_time >= self.token_refresh_interval:
                     logger.info("Token即将过期，准备刷新...")
-                    
+
                     new_token = await self.refresh_token()
                     if new_token:
                         logger.info("Token刷新成功，准备重新建立连接...")
@@ -101,10 +101,10 @@ class XianyuLive:
                         logger.error("Token刷新失败，将在{}分钟后重试".format(self.token_retry_interval // 60))
                         await asyncio.sleep(self.token_retry_interval)  # 使用配置的重试间隔
                         continue
-                
+
                 # 每分钟检查一次
                 await asyncio.sleep(60)
-                
+
             except Exception as e:
                 logger.error(f"Token刷新循环出错: {e}")
                 await asyncio.sleep(60)
@@ -160,11 +160,11 @@ class XianyuLive:
         if not self.current_token or (time.time() - self.last_token_refresh_time) >= self.token_refresh_interval:
             logger.info("获取初始token...")
             await self.refresh_token()
-        
+
         if not self.current_token:
             logger.error("无法获取有效token，初始化失败")
             raise Exception("Token获取失败")
-            
+
         msg = {
             "lwp": "/reg",
             "headers": {
@@ -192,8 +192,8 @@ class XianyuLive:
         """判断是否为用户聊天消息"""
         try:
             return (
-                isinstance(message, dict) 
-                and "1" in message 
+                isinstance(message, dict)
+                and "1" in message
                 and isinstance(message["1"], dict)  # 确保是字典类型
                 and "10" in message["1"]
                 and isinstance(message["1"]["10"], dict)  # 确保是字典类型
@@ -243,13 +243,13 @@ class XianyuLive:
             )
         except Exception:
             return False
-    
+
     def is_bracket_system_message(self, message):
         """检查是否为带中括号的系统消息"""
         try:
             if not message or not isinstance(message, str):
                 return False
-            
+
             clean_message = message.strip()
             # 检查是否以 [ 开头，以 ] 结尾
             if clean_message.startswith('[') and clean_message.endswith(']'):
@@ -269,7 +269,7 @@ class XianyuLive:
         """检查特定会话是否处于人工接管模式"""
         if chat_id not in self.manual_mode_conversations:
             return False
-        
+
         # 检查是否超时
         current_time = time.time()
         if chat_id in self.manual_mode_timestamps:
@@ -277,7 +277,7 @@ class XianyuLive:
                 # 超时，自动退出人工模式
                 self.exit_manual_mode(chat_id)
                 return False
-        
+
         return True
 
     def enter_manual_mode(self, chat_id):
@@ -299,7 +299,7 @@ class XianyuLive:
         else:
             self.enter_manual_mode(chat_id)
             return "manual"
-    
+
     def format_price(self, price):
         """
         处理逻辑：标准化价格（分转元）
@@ -309,19 +309,19 @@ class XianyuLive:
         except (ValueError, TypeError):
             # 遇到 None 或脏数据，默认返回 0
             return 0.0
-    
+
     def build_item_description(self, item_info):
         """构建商品描述"""
-        
+
         # 处理 SKU 列表
         clean_skus = []
         raw_sku_list = item_info.get('skuList', [])
-        
+
         for sku in raw_sku_list:
             # 提取规格文本
             specs = [p['valueText'] for p in sku.get('propertyList', []) if p.get('valueText')]
             spec_text = " ".join(specs) if specs else "默认规格"
-            
+
             clean_skus.append({
                 "spec": spec_text,
                 "price": self.format_price(sku.get('price', 0)),
@@ -330,7 +330,7 @@ class XianyuLive:
 
         # 获取价格
         valid_prices = [s['price'] for s in clean_skus if s['price'] > 0]
-        
+
         if valid_prices:
             min_price = min(valid_prices)
             max_price = max(valid_prices)
@@ -382,7 +382,7 @@ class XianyuLive:
 
             # 获取并解密数据
             sync_data = message_data["body"]["syncPushPackage"]["data"][0]
-            
+
             # 检查是否有必要的字段
             if "data" not in sync_data:
                 logger.debug("同步包中无data字段")
@@ -439,17 +439,17 @@ class XianyuLive:
             send_user_name = message["1"]["10"]["reminderTitle"]
             send_user_id = message["1"]["10"]["senderUserId"]
             send_message = message["1"]["10"]["reminderContent"]
-            
+
             # 时效性验证（过滤5分钟前消息）
             if (time.time() * 1000 - create_time) > self.message_expire_time:
                 logger.debug("过期消息丢弃")
                 return
-                
+
             # 获取商品ID和会话ID
             url_info = message["1"]["10"]["reminderUrl"]
             item_id = url_info.split("itemId=")[1].split("&")[0] if "itemId=" in url_info else None
             chat_id = message["1"]["2"].split('@')[0]
-            
+
             if not item_id:
                 logger.warning("无法获取商品ID")
                 return
@@ -457,7 +457,7 @@ class XianyuLive:
             # 检查是否为卖家（自己）发送的控制命令
             if send_user_id == self.myid:
                 logger.debug("检测到卖家消息，检查是否为控制命令")
-                
+
                 # 检查切换命令
                 if self.check_toggle_keywords(send_message):
                     mode = self.toggle_manual_mode(chat_id)
@@ -466,15 +466,15 @@ class XianyuLive:
                     else:
                         logger.info(f"🟢 已恢复会话 {chat_id} 的自动回复 (商品: {item_id})")
                     return
-                
+
                 # 记录卖家人工回复
                 self.context_manager.add_message_by_chat(chat_id, self.myid, item_id, "assistant", send_message)
                 logger.info(f"卖家人工回复 (会话: {chat_id}, 商品: {item_id}): {send_message}")
                 return
-            
+
             logger.info(f"用户: {send_user_name} (ID: {send_user_id}), 商品: {item_id}, 会话: {chat_id}, 消息: {send_message}")
-            
-            
+
+
             # 如果当前会话处于人工接管模式，不进行自动回复
             if self.is_manual_mode(chat_id):
                 logger.info(f"🔴 会话 {chat_id} 处于人工接管模式，跳过自动回复")
@@ -502,37 +502,38 @@ class XianyuLive:
                     return
             else:
                 logger.info(f"从数据库获取商品信息: {item_id}")
-                
+
             item_description=f"当前商品的信息如下：{self.build_item_description(item_info)}"
-            
+
             # 获取完整的对话上下文
             context = self.context_manager.get_context_by_chat(chat_id)
             # 生成回复
             bot_reply = bot.generate_reply(
                 send_message,
                 item_description,
-                context=context
+                context=context,
+                chat_id=chat_id
             )
-            
+
             # 检查是否需要回复
             if bot_reply == "-":
                 logger.info(f"[无需回复] 用户 {send_user_name} 的消息被识别为无需回复类型")
                 return
-            
+
             # 添加用户消息到上下文
             self.context_manager.add_message_by_chat(chat_id, send_user_id, item_id, "user", send_message)
-            
+
             # 检查是否为价格意图，如果是则增加议价次数
             if bot.last_intent == "price":
                 self.context_manager.increment_bargain_count_by_chat(chat_id)
                 bargain_count = self.context_manager.get_bargain_count_by_chat(chat_id)
                 logger.info(f"用户 {send_user_name} 对商品 {item_id} 的议价次数: {bargain_count}")
-            
+
             # 添加机器人回复到上下文
             self.context_manager.add_message_by_chat(chat_id, self.myid, item_id, "assistant", bot_reply)
-            
+
             logger.info(f"机器人回复: {bot_reply}")
-            
+
             # 模拟人工输入延迟
             if self.simulate_human_typing:
                 # 基础延迟 0-1秒 + 每字 0.1-0.3秒
@@ -541,12 +542,12 @@ class XianyuLive:
                 total_delay = base_delay + typing_delay
                 # 设置最大延迟上限，防止过长回复等待太久
                 total_delay = min(total_delay, 10.0)
-                
+
                 logger.info(f"模拟人工输入，延迟发送 {total_delay:.2f} 秒...")
                 await asyncio.sleep(total_delay)
-                
+
             await self.send_msg(websocket, chat_id, send_user_id, bot_reply)
-            
+
         except Exception as e:
             logger.error(f"处理消息时发生错误: {str(e)}")
             logger.debug(f"原始消息: {message_data}")
@@ -574,16 +575,16 @@ class XianyuLive:
         while True:
             try:
                 current_time = time.time()
-                
+
                 # 检查是否需要发送心跳
                 if current_time - self.last_heartbeat_time >= self.heartbeat_interval:
                     await self.send_heartbeat(ws)
-                
+
                 # 检查上次心跳响应时间，如果超时则认为连接已断开
                 if (current_time - self.last_heartbeat_response) > (self.heartbeat_interval + self.heartbeat_timeout):
                     logger.warning("心跳响应超时，可能连接已断开")
                     break
-                
+
                 await asyncio.sleep(1)
             except Exception as e:
                 logger.error(f"心跳循环出错: {e}")
@@ -611,7 +612,7 @@ class XianyuLive:
             try:
                 # 重置连接重启标志
                 self.connection_restart_flag = False
-                
+
                 headers = {
                     "Cookie": self.cookies_str,
                     "Host": "wss-goofish.dingtalk.com",
@@ -627,30 +628,30 @@ class XianyuLive:
                 async with websockets.connect(self.base_url, extra_headers=headers) as websocket:
                     self.ws = websocket
                     await self.init(websocket)
-                    
+
                     # 初始化心跳时间
                     self.last_heartbeat_time = time.time()
                     self.last_heartbeat_response = time.time()
-                    
+
                     # 启动心跳任务
                     self.heartbeat_task = asyncio.create_task(self.heartbeat_loop(websocket))
-                    
+
                     # 启动token刷新任务
                     self.token_refresh_task = asyncio.create_task(self.token_refresh_loop())
-                    
+
                     async for message in websocket:
                         try:
                             # 检查是否需要重启连接
                             if self.connection_restart_flag:
                                 logger.info("检测到连接重启标志，准备重新建立连接...")
                                 break
-                                
+
                             message_data = json.loads(message)
-                            
+
                             # 处理心跳响应
                             if await self.handle_heartbeat_response(message_data):
                                 continue
-                            
+
                             # 发送通用ACK响应
                             if "headers" in message_data and "mid" in message_data["headers"]:
                                 ack = {
@@ -665,10 +666,10 @@ class XianyuLive:
                                     if key in message_data["headers"]:
                                         ack["headers"][key] = message_data["headers"][key]
                                 await websocket.send(json.dumps(ack))
-                            
+
                             # 处理其他消息
                             await self.handle_message(message_data, websocket)
-                                
+
                         except json.JSONDecodeError:
                             logger.error("消息解析失败")
                         except Exception as e:
@@ -677,10 +678,10 @@ class XianyuLive:
 
             except websockets.exceptions.ConnectionClosed:
                 logger.warning("WebSocket连接已关闭")
-                
+
             except Exception as e:
                 logger.error(f"连接发生错误: {e}")
-                
+
             finally:
                 # 清理任务
                 if self.heartbeat_task:
@@ -689,14 +690,14 @@ class XianyuLive:
                         await self.heartbeat_task
                     except asyncio.CancelledError:
                         pass
-                        
+
                 if self.token_refresh_task:
                     self.token_refresh_task.cancel()
                     try:
                         await self.token_refresh_task
                     except asyncio.CancelledError:
                         pass
-                
+
                 # 如果是主动重启，立即重连；否则等待5秒
                 if self.connection_restart_flag:
                     logger.info("主动重启连接，立即重连...")
@@ -704,75 +705,217 @@ class XianyuLive:
                     logger.info("等待5秒后重连...")
                     await asyncio.sleep(5)
 
+async def run_cli_mode():
+    """
+    本地交互式 Mock 命令行调试终端。
+    无需闲鱼 Cookie，直接通过本地终端与重构后的 Agent 开展议价博弈和详情咨询。
+    """
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.text import Text
+    from rich.prompt import Prompt
+
+    console = Console()
+    console.print(Panel(
+        "[bold green]Falses Goofish GuardAgent 本地模拟调试终端[/bold green]\n"
+        "您现在扮演 [bold yellow]买家[/bold yellow]，可在下方输入框内对商品进行咨询或砍价。\n"
+        "系统将使用您的 .env 配置自动调用大模型。无需闲鱼凭证，开箱即用。\n"
+        "输入 [bold red]exit[/bold red] 或 [bold red]quit[/bold red] 退出系统。",
+        title="⚙️ 二开本地 Mock 调试端",
+        border_style="green"
+    ))
+
+    # 1. 实例化机器人并配置模拟商品上下文
+    bot = XianyuReplyBot()
+    chat_id = "mock_chat_001"
+
+    # 清理此前的测试缓存，以防混淆
+    bot.db.reset_chat_state(chat_id)
+
+    # 2. 从本地 JSON 库加载测试商品信息
+    item_info = {}
+    info_path = "data/product_info.json"
+    if os.path.exists(info_path):
+        try:
+            with open(info_path, "r", encoding="utf-8") as f:
+                item_info = json.load(f)
+        except Exception as e:
+            logger.warning(f"无法读取商品配置 json: {e}")
+
+    item_title = item_info.get("title", "二手 iPad Pro 11寸")
+    original_price = item_info.get("original_price", 4299)
+    min_price = item_info.get("min_price", 3800)
+
+    # 构建与咸鱼接口格式一致的描述
+    item_description = f"当前商品的信息如下：标题:{item_title} 价格:{original_price}元 详情: {json.dumps(item_info, ensure_ascii=False)}"
+
+    # 打印商品名片
+    console.print(Panel(
+        f"[bold cyan]测试在售商品[/bold cyan]: {item_title}\n"
+        f"[bold yellow]上架定价[/bold yellow]: {original_price} 元 | [bold red]最大折扣底线[/bold red]: {min_price} 元\n"
+        f"[bold green]邮寄规则[/bold green]: {item_info.get('shipping_fee', '包邮')}",
+        title="📦 示例商品卡片",
+        border_style="cyan",
+        expand=False
+    ))
+
+    # 3. 核心聊天交互循环
+    while True:
+        try:
+            user_input = await asyncio.to_thread(
+                Prompt.ask,
+                Text("\n[买家] 请输入咨询内容", style="bold cyan")
+            )
+
+            if user_input.strip().lower() in ["exit", "quit"]:
+                console.print("[bold red]已退出本地调试终端。[/bold red]")
+                break
+
+            if not user_input.strip():
+                continue
+
+            # 使用状态动画掩盖 API 调用延迟
+            with console.status("[bold yellow]Agent 正在决策路由并生成回复...", spinner="dots"):
+                # 获取 SQLite 对话历史
+                context = bot.db.get_context_by_chat(chat_id)
+
+                # 调用 Bot 生成回复
+                bot_reply = bot.generate_reply(
+                    user_input,
+                    item_description,
+                    context=context,
+                    chat_id=chat_id
+                )
+
+                # 将用户提问写入 SQLite 上下文
+                bot.db.add_message_by_chat(chat_id, "buyer", "mock_item_001", "user", user_input)
+
+                # 如果判定为价格意图，增加议价次数
+                if bot.last_intent == "price":
+                    bot.db.increment_bargain_count_by_chat(chat_id)
+
+                # 将 AI 回复写入 SQLite 上下文
+                if bot_reply != "-":
+                    bot.db.add_message_by_chat(chat_id, "seller", "mock_item_001", "assistant", bot_reply)
+
+            # 读取持久化的决策细节并呈现
+            last_committed, buyer_highest = bot.db.get_price_commitments(chat_id)
+            bargain_count = bot.db.get_bargain_count_by_chat(chat_id)
+
+            console.print(Panel(
+                f"[bold]识别意图[/bold]: {bot.last_intent}\n"
+                f"[bold]议价次数[/bold]: {bargain_count} 次\n"
+                f"[bold]价格承诺跟踪[/bold]: 我方承诺价格水位 [{last_committed if last_committed else '无'}] 元 | 买家最高出价 [{buyer_highest if buyer_highest else '无'}] 元",
+                title="⚙️ 决策状态监控 (二开新增)",
+                border_style="yellow",
+                expand=False
+            ))
+
+            # 打字机特效打印回复
+            if bot_reply == "-":
+                console.print("\n[AI 客服] [dim italic yellow](消息被判定为 no_reply，已跳过回复)[/dim italic yellow]")
+            else:
+                console.print(Text("\n[AI 客服] ", style="bold green"), end="")
+                for char in bot_reply:
+                    print(char, end="", flush=True)
+                    await asyncio.sleep(0.015)
+                print()
+
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[bold red]程序已强行终止。[/bold red]")
+            break
 
 
 def check_and_complete_env():
     """检查并补全关键环境变量"""
-    # 定义关键变量及其默认无效值（占位符）
-    critical_vars = {
-        "API_KEY": "默认使用通义千问,apikey通过百炼模型平台获取",
-        "COOKIES_STR": "your_cookies_here"
+    placeholder_values = {
+        "API_KEY": {
+            "your_api_key_here",
+            "your_apikey_here",
+            "默认使用通义千问,apikey通过百炼模型平台获取",
+        },
+        "COOKIES_STR": {"your_cookies_here"},
     }
-    
+
     env_path = ".env"
     updated = False
-    
-    for key, placeholder in critical_vars.items():
+
+    for key, placeholders in placeholder_values.items():
         curr_val = os.getenv(key)
-        
-        # 如果变量未设置，或者值等于占位符
-        if not curr_val or curr_val == placeholder:
-            logger.warning(f"配置项 [{key}] 未设置或为默认值，请输入")
+        if not curr_val or curr_val in placeholders:
+            logger.warning(f"配置项 [{key}] 未设置，请输入")
             while True:
                 val = input(f"请输入 {key}: ").strip()
                 if val:
-                    # 更新当前环境
                     os.environ[key] = val
-                    
-                    # 尝试持久化到 .env
                     try:
-                        # 如果没有.env文件，先创建
                         if not os.path.exists(env_path):
                             with open(env_path, 'w', encoding='utf-8') as f:
-                                pass # Create empty file
-                        
+                                pass
                         set_key(env_path, key, val)
                         updated = True
                     except Exception as e:
-                        logger.warning(f"无法自动写入.env文件，请手动保存: {e}")
+                        logger.warning(f"无法自动写入.env文件: {e}")
                     break
                 else:
                     print(f"{key} 不能为空，请重新输入")
-    
     if updated:
         logger.info("新的配置已保存/更新至 .env 文件中")
 
 
 if __name__ == '__main__':
-    # 加载环境变量
+    import argparse
+    import sys
+
+    # 1. 解析启动命令行参数
+    parser = argparse.ArgumentParser(description="Falses Goofish GuardAgent (XianyuAutoAgent 深度二开版)")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="xianyu",
+        choices=["xianyu", "cli"],
+        help="运行模式：xianyu (咸鱼 WebSocket 挂机模式，需 Cookie)；cli (本地命令行交互 Mock 调试)"
+    )
+    args = parser.parse_args()
+
+    # 2. 加载环境变量
     if os.path.exists(".env"):
         load_dotenv()
         logger.info("已加载 .env 配置")
-    
     if os.path.exists(".env.example"):
         load_dotenv(".env.example")  # 不会覆盖已存在的变量
         logger.info("已加载 .env.example 默认配置")
-    
-    # 配置日志级别
-    log_level = os.getenv("LOG_LEVEL", "DEBUG").upper()
-    logger.remove()  # 移除默认handler
+
+    # 3. 配置日志级别
+    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    logger.remove()
     logger.add(
         sys.stderr,
         level=log_level,
         format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
     )
-    logger.info(f"日志级别设置为: {log_level}")
-    
-    # 交互式检查并补全配置
-    check_and_complete_env()
-    
-    cookies_str = os.getenv("COOKIES_STR")
-    bot = XianyuReplyBot()
-    xianyuLive = XianyuLive(cookies_str)
-    # 常驻进程
-    asyncio.run(xianyuLive.main())
+    logger.info(f"日志级别设置为: {log_level} | 当前模式: {args.mode}")
+
+    # 4. 根据模式分支执行
+    if args.mode == "cli":
+        # 本地调试模式下，如果未配 API_KEY，引导输入
+        if not os.getenv("API_KEY") or os.getenv("API_KEY") in {"your_api_key_here", "your_apikey_here"}:
+            logger.warning("未配置 API_KEY，请先输入 API_KEY 以使用大模型进行交互：")
+            api_key = input("API_KEY: ").strip()
+            if api_key:
+                os.environ["API_KEY"] = api_key
+                if os.path.exists(".env"):
+                    set_key(".env", "API_KEY", api_key)
+            else:
+                logger.error("API_KEY 不能为空，程序退出。")
+                sys.exit(1)
+
+        # 启动异步本地 CLI 对话终端
+        asyncio.run(run_cli_mode())
+    else:
+        # 挂机长连接模式下，交互式检查并补全 Cookie 和 API_KEY
+        check_and_complete_env()
+        cookies_str = os.getenv("COOKIES_STR")
+        bot = XianyuReplyBot()
+        xianyuLive = XianyuLive(cookies_str)
+        asyncio.run(xianyuLive.main())

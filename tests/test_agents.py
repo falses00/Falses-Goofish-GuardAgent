@@ -1,0 +1,125 @@
+import os
+import sys
+import pytest
+
+# 确保 XianyuAutoAgent 根目录在 Python 模块搜索路径中
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from core.experts import BargainExpert, FAQExpert
+from context_manager import ChatContextManager
+
+def test_bargain_expert_pan_bargain():
+    """测试买家没有提出具体价格时的泛议价策略"""
+    original_price = 4299.0
+    min_price = 3800.0
+    expert = BargainExpert(original_price, min_price)
+
+    # 模拟首轮泛议价
+    decision = expert.calculate_next_price(buyer_offer=None, last_committed_price=None)
+    assert decision["action"] == "NEGOTIATE"
+    # 应主动给出微调降价 (concession = (4299-3800)*0.15 = 74.85， 4299-75 = 4224)
+    assert decision["price"] == 4224
+
+def test_bargain_expert_below_min():
+    """测试买家提出低于绝对底价的出价时的拒绝策略"""
+    original_price = 4299.0
+    min_price = 3800.0
+    expert = BargainExpert(original_price, min_price)
+
+    # 买家出价 3000 元（低于底线 3800）
+    decision = expert.calculate_next_price(buyer_offer=3000.0, last_committed_price=4299.0)
+    assert decision["action"] == "REFUSE_AND_COUNTER"
+    # 我们应拒绝并在原报价基础上降 30% 差额，但守住 3800
+    # suggested = 4299 - (4299-3800)*0.3 = 4299 - 149.7 = 4149.3 -> 4149
+    assert decision["price"] == 4149
+
+
+def test_bargain_expert_negotiate():
+    """测试买家提出处于合理价格区间时的拉锯与妥协策略"""
+    original_price = 4299.0
+    min_price = 3800.0
+    expert = BargainExpert(original_price, min_price)
+
+    # 上一次我方报价 4150，买家出价 3900 元（在底线 3800 以上）
+    decision = expert.calculate_next_price(buyer_offer=3900.0, last_committed_price=4150.0)
+    assert decision["action"] == "NEGOTIATE"
+    # 差额 = 4150 - 3900 = 250。我们退让 40%，即退让 100 元 -> 4150 - 100 = 4050 元
+    assert decision["price"] == 4050
+
+def test_bargain_expert_accept():
+    """测试买家出价与我方极其接近时的直接同意成交策略"""
+    original_price = 4299.0
+    min_price = 3800.0
+    expert = BargainExpert(original_price, min_price)
+
+    # 上一次我方报价 3820 元，买家出价 3815 元（与我们极其贴近）
+    decision = expert.calculate_next_price(buyer_offer=3815.0, last_committed_price=3820.0)
+    assert decision["action"] == "ACCEPT"
+    assert decision["price"] == 3815.0
+
+
+def test_bargain_expert_never_raises_committed_price():
+    """买家出价高于历史承诺价时，不能重新报更高价格。"""
+    expert = BargainExpert(original_price=4299.0, min_price=3800.0)
+
+    decision = expert.calculate_next_price(buyer_offer=4100.0, last_committed_price=4050.0)
+
+    assert decision["action"] == "ACCEPT"
+    assert decision["price"] == 4050.0
+
+def test_faq_expert_rag():
+    """测试 FAQ 知识库对不同关键词的 RAG 参数精准匹配"""
+    product_info = {
+      "title": "二手 iPad Pro 11寸",
+      "shipping_fee": "包邮 (顺丰包邮)",
+      "specs": { "battery_health": "93%" },
+      "condition": { "screen": "完美无划痕", "repair": "无任何拆修历史" },
+      "accessories": { "charger": "带原装 20W 充电头" }
+    }
+
+    expert = FAQExpert(product_info)
+
+    # 咨询屏幕/成色
+    kb1 = expert.extract_related_kb("这个机子屏幕有划痕吗")
+    assert "完美无划痕" in kb1
+
+    # 咨询配件
+    kb2 = expert.extract_related_kb("送充电头吗")
+    assert "带原装 20W 充电头" in kb2
+
+    # 咨询拆修
+    kb3 = expert.extract_related_kb("有没有拆过或者换过屏幕")
+    assert "无任何拆修历史" in kb3
+
+
+def test_price_commitment_memory_is_monotonic(tmp_path):
+    """价格记忆应保守更新：我方最低承诺取更低值，买家最高出价取更高值。"""
+    db_path = tmp_path / "chat_history.db"
+    manager = ChatContextManager(db_path=str(db_path))
+
+    manager.update_price_commitments(
+        "chat_a",
+        lowest_price_committed=4100,
+        buyer_highest_offer=3900,
+    )
+    manager.update_price_commitments(
+        "chat_a",
+        lowest_price_committed=4200,
+        buyer_highest_offer=3800,
+    )
+
+    lowest_committed, buyer_highest = manager.get_price_commitments("chat_a")
+
+    assert lowest_committed == 4100
+    assert buyer_highest == 3900
+
+    manager.update_price_commitments(
+        "chat_a",
+        lowest_price_committed=4050,
+        buyer_highest_offer=4000,
+    )
+
+    lowest_committed, buyer_highest = manager.get_price_commitments("chat_a")
+
+    assert lowest_committed == 4050
+    assert buyer_highest == 4000

@@ -1,112 +1,217 @@
-# 🚀 Xianyu AutoAgent - 智能闲鱼客服机器人系统
+# Falses Goofish GuardAgent
 
-[![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/) [![LLM Powered](https://img.shields.io/badge/LLM-powered-FF6F61)](https://platform.openai.com/)
+> A local-first AI customer-service and bargain-guard agent for Xianyu / Goofish.
 
-专为闲鱼平台打造的AI值守解决方案，实现闲鱼平台7×24小时自动化值守，支持多专家协同决策、智能议价和上下文感知对话。 
+本项目由 **falses00** 基于 [shaxiu/XianyuAutoAgent](https://github.com/shaxiu/XianyuAutoAgent) 与 [cv-cat/XianYuApis](https://github.com/cv-cat/XianYuApis) 的开源思路继续二次开发，目标不是再做一个简单自动回复脚本，而是把闲鱼客服场景里最容易失控的三件事收住：
 
+- 买家砍价时，LLM 不能被话术诱导突破底价。
+- 商品详情咨询时，LLM 不能编造配件、成色、拆修、发货信息。
+- 本地演示和迭代时，不必每次都依赖真实 Cookie 和真实买家消息。
 
-## 🌟 核心特性
+当前版本保留原项目的闲鱼 WebSocket 长连接能力，并新增本地 Mock CLI、SQLite 价格承诺记忆、硬规则议价护栏、JSON 商品知识库和针对核心策略的自动化测试。
 
-### 智能对话引擎
-| 功能模块   | 技术实现            | 关键特性                                                     |
-| ---------- | ------------------- | ------------------------------------------------------------ |
-| 上下文感知 | 会话历史存储        | 轻量级对话记忆管理，完整对话历史作为LLM上下文输入            |
-| 专家路由   | LLM prompt+规则路由 | 基于提示工程的意图识别 → 专家Agent动态分发，支持议价/技术/客服多场景切换 |
+仓库地址：[https://github.com/falses00/XianyuAutoAgent](https://github.com/falses00/XianyuAutoAgent)
 
-### 业务功能矩阵
-| 模块     | 已实现                        | 规划中                       |
-| -------- | ----------------------------- | ---------------------------- |
-| 核心引擎 | ✅ LLM自动回复<br>✅ 上下文管理 | 🔄 情感分析增强               |
-| 议价系统 | ✅ 阶梯降价策略                | 🔄 市场比价功能               |
-| 技术支持 | ✅ 网络搜索整合                | 🔄 RAG知识库增强              |
-| 运维监控 | ✅ 基础日志                    | 🔄 钉钉集成<br>🔄  Web管理界面 |
+## 为什么叫 GuardAgent
 
-## 🎨效果图
-<div align="center">
-  <img src="./images/demo1.png" width="600" alt="客服">
-  <br>
-  <em>图1: 客服随叫随到</em>
-</div>
+传统 AI 客服很会聊天，但在交易场景里，“会聊天”不够。它还需要守住底价、守住事实、守住平台沟通边界。
 
+`Falses Goofish GuardAgent` 的核心思路是：
 
-<div align="center">
-  <img src="./images/demo2.png" width="600" alt="议价专家">
-  <br>
-  <em>图2: 阶梯式议价</em>
-</div>
+- **LLM 负责表达**：把回复写得自然、像真人卖家。
+- **规则负责底线**：价格、承诺、商品事实由确定性代码控制。
+- **SQLite 负责记忆**：多轮会话中记录历史报价和买家最高出价。
+- **本地模式负责调试**：不接入闲鱼也能复现议价和咨询链路。
 
-<div align="center">
-  <img src="./images/demo3.png" width="600" alt="技术专家"> 
-  <br>
-  <em>图3: 技术专家上场</em>
-</div>
+## 核心特性
 
-<div align="center">
-  <img src="./images/log.png" width="600" alt="后台log"> 
-  <br>
-  <em>图4: 后台log</em>
-</div>
+### 1. 本地 Mock CLI 调试
 
-
-## 🚴 快速开始
-小白请直接查看[保姆级教学文档](https://my.feishu.cn/wiki/JtkBwkI9GiokZikVdyNceEfZncE)
-### 环境要求
-- Python 3.8+
-
-### 安装步骤
 ```bash
-1. 克隆仓库
-git clone https://github.com/shaxiu/XianyuAutoAgent.git
+python main.py --mode cli
+```
+
+无需配置闲鱼 Cookie，即可在终端模拟买家咨询和砍价。CLI 会展示意图识别、议价次数、我方历史承诺价、买家最高出价，适合演示、面试和本地策略调参。
+
+### 2. 议价安全护栏
+
+`core/experts.py` 中的 `BargainExpert` 会先根据原价、最低价、买家出价和历史承诺价计算安全报价，再把这个结果交给 LLM 润色。
+
+已处理的关键边界：
+
+- 买家没有给具体价格时，只做小幅让步。
+- 买家出价低于底线时，拒绝并给出安全反报价。
+- 买家出价接近我方底线时，可直接接受成交。
+- 买家出价高于历史承诺价时，不再把报价抬高，避免前后矛盾。
+
+### 3. SQLite 价格承诺记忆
+
+`context_manager.py` 维护会话历史、议价次数、我方最低承诺价和买家最高出价。
+
+价格记忆采用保守更新策略：
+
+- `lowest_price_committed` 只会记录更低的我方承诺价。
+- `buyer_highest_offer` 只会记录更高的买家出价。
+- live 模式会按真实 `chat_id` 隔离会话，不再让不同买家共享 mock 会话状态。
+
+### 4. JSON 商品知识库
+
+`data/product_info.json` 保存商品标题、原价、最低价、成色、拆修、配件、发货、面交和常见问题。
+
+当买家询问电池、成色、划痕、配件、拆修、快递、面交等问题时，`FAQExpert` 会提取相关事实并注入模型上下文，减少幻觉和售后争议。
+
+### 5. 闲鱼 WebSocket 挂机模式
+
+```bash
+python main.py --mode xianyu
+```
+
+该模式需要 `COOKIES_STR`，用于连接闲鱼 / Goofish WebSocket 并自动处理消息。仍建议先用 CLI 模式验证商品数据、提示词和价格策略。
+
+## 项目结构
+
+```text
+XianyuAutoAgent/
+├── main.py                     # 启动入口：xianyu / cli 两种模式
+├── XianyuAgent.py              # 意图路由、价格 Agent、详情 Agent、默认 Agent
+├── XianyuApis.py               # 闲鱼 / Goofish API 与 WebSocket 封装
+├── context_manager.py          # SQLite 会话历史、议价次数、价格承诺记忆
+├── core/
+│   ├── __init__.py
+│   └── experts.py              # BargainExpert 与 FAQExpert
+├── data/
+│   └── product_info.json       # 示例商品知识库
+├── prompts/                    # 提示词模板，正式提示词默认不入库
+├── tests/
+│   └── test_agents.py          # 核心策略单元测试
+├── .env.example                # 配置模板
+├── requirements.txt
+└── docker-compose.yml
+```
+
+## 快速开始
+
+### 1. 克隆项目
+
+```bash
+git clone https://github.com/falses00/XianyuAutoAgent.git
 cd XianyuAutoAgent
-
-2. 安装依赖
-pip install -r requirements.txt
-
-3. 配置环境变量
-创建一个 `.env` 文件，包含以下内容，也可直接重命名 `.env.example` ：
-#必配配置
-API_KEY=apikey通过模型平台获取
-COOKIES_STR=填写网页端获取的cookie
-MODEL_BASE_URL=模型地址
-MODEL_NAME=模型名称
-#可选配置
-TOGGLE_KEYWORDS=接管模式切换关键词，默认为句号（输入句号切换为人工接管，再次输入则切换AI接管）
-SIMULATE_HUMAN_TYPING=True/False #模拟人工回复延迟
-
-注意：默认使用的模型是通义千问，如需使用其他API，请自行修改.env文件中的模型地址和模型名称；
-COOKIES_STR自行在闲鱼网页端获取cookies(网页端F12打开控制台，选择Network，点击Fetch/XHR,点击一个请求，查看cookies)
-
-4. 创建提示词文件prompts/*_prompt.txt（也可以直接将模板名称中的_example去掉），否则默认读取四个提示词模板中的内容
 ```
 
-### 使用方法
+### 2. 安装依赖
 
-运行主程序：
+建议 Python 3.10+。
+
 ```bash
-python main.py
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 ```
 
-### 自定义提示词
+### 3. 配置环境变量
 
-可以通过编辑 `prompts` 目录下的文件来自定义各个专家的提示词：
+```bash
+copy .env.example .env
+```
 
-- `classify_prompt.txt`: 意图分类提示词
-- `price_prompt.txt`: 价格专家提示词
-- `tech_prompt.txt`: 技术专家提示词
-- `default_prompt.txt`: 默认回复提示词
+最少需要填写：
 
-## 🤝 参与贡献
+```ini
+API_KEY=your_api_key_here
+MODEL_BASE_URL=https://api.deepseek.com/v1
+MODEL_NAME=deepseek-chat
+DEFAULT_DISCOUNT_LIMIT=0.85
+```
 
-欢迎通过 Issue 提交建议或 PR 贡献代码。
+如果使用 Ollama 或其他 OpenAI-compatible 本地模型，可改成：
 
-## 📖 项目说明
+```ini
+API_KEY=ollama
+MODEL_BASE_URL=http://127.0.0.1:11434/v1
+MODEL_NAME=qwen2.5:7b-instruct
+```
 
-本项目基于 [XianYuApis](https://github.com/cv-cat/XianYuApis) 进行二次开发，在原项目基础上增加了多 Agent 协作、上下文持久化管理、Docker 部署支持等功能。
+### 4. 本地模拟运行
 
-本项目仅供学习与技术交流使用。
+```bash
+python main.py --mode cli
+```
 
-## 📄 License
+可以尝试输入：
 
-MIT License — 参见 [LICENSE](LICENSE) 文件
+- `在吗`
+- `这个屏幕有划痕吗，电池怎么样`
+- `能少点吗`
+- `3000 卖不卖，我学生`
+- `4100 可以我马上拍`
 
+### 5. 闲鱼挂机运行
 
+在 `.env` 中补充自己的 Cookie：
+
+```ini
+COOKIES_STR=your_cookies_here
+```
+
+然后启动：
+
+```bash
+python main.py --mode xianyu
+```
+
+## 自动化测试
+
+```bash
+pytest tests/test_agents.py -q
+```
+
+当前测试覆盖：
+
+- 泛议价微降策略。
+- 低于底线的拒绝与反报价。
+- 合理区间出价的折中策略。
+- 接近底线时直接成交。
+- 历史承诺价不被抬高。
+- 商品知识库关键词命中。
+
+## 配置项
+
+| 变量 | 说明 |
+| --- | --- |
+| `API_KEY` | OpenAI-compatible 模型服务密钥 |
+| `MODEL_BASE_URL` | 模型 API base URL |
+| `MODEL_NAME` | 模型名称 |
+| `COOKIES_STR` | 闲鱼 / Goofish 网页端 Cookie，仅 xianyu 模式需要 |
+| `DEFAULT_DISCOUNT_LIMIT` | 最低折扣比例，例如 `0.85` 表示最多降到 8.5 折 |
+| `TOGGLE_KEYWORDS` | 人工接管切换关键词，默认 `。` |
+| `SIMULATE_HUMAN_TYPING` | 是否模拟真人输入延迟 |
+| `LOG_LEVEL` | 日志级别 |
+
+## 二开参考方向
+
+这次改造吸收了同类项目的几个方向，但保持当前仓库轻量：
+
+- `xianyu-auto-reply` 类项目的多账号、自动发货、后台监控思路，后续可作为 Web 管理后台方向。
+- 本地控制台类项目的商品专属策略、Ollama 兼容、本地长期托管思路。
+- `XianyuBot` 类项目的分层架构、多专家协同和 RAG 规划。
+- `XianYuApis` 的闲鱼 API / WebSocket 底座思路。
+
+本仓库当前优先把“报价安全、事实准确、本地可调试”做稳，再逐步扩展 UI、自动发货、多账号和统计分析。
+
+## 合规与风险
+
+- 本项目不是闲鱼 / Goofish 官方项目，也不是官方 API。
+- 仅用于学习、研究和自有账号的自动化辅助。
+- Cookie、API Key、聊天数据库和私有提示词不要提交到公开仓库。
+- 自动回复可能造成交易承诺，请在真实运行前充分测试并保留人工接管能力。
+- 请遵守平台规则、法律法规和所在地区的合规要求。
+
+## 致谢
+
+- [shaxiu/XianyuAutoAgent](https://github.com/shaxiu/XianyuAutoAgent)：原始 AI 闲鱼客服项目与多专家思路。
+- [cv-cat/XianYuApis](https://github.com/cv-cat/XianYuApis)：闲鱼接口和 WebSocket 技术参考。
+- Python、OpenAI SDK、websockets、loguru、python-dotenv、rich、pytest 等开源生态。
+
+## License
+
+本项目沿用上游仓库的 GPL-3.0 协议。详见 [LICENSE](./LICENSE)。
