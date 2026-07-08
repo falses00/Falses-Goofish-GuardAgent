@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from core.experts import BargainExpert, FAQExpert
 from context_manager import ChatContextManager
+from XianyuAgent import PriceAgent
 
 def test_bargain_expert_pan_bargain():
     """测试买家没有提出具体价格时的泛议价策略"""
@@ -90,6 +91,40 @@ def test_faq_expert_rag():
     # 咨询拆修
     kb3 = expert.extract_related_kb("有没有拆过或者换过屏幕")
     assert "无任何拆修历史" in kb3
+
+    # 未命中时不伪装成 RAG 命中，交给商品描述和通用提示词兜底
+    kb4 = expert.extract_related_kb("你好")
+    assert kb4 == ""
+
+
+def test_price_profile_prefers_json_floor(monkeypatch):
+    """商品配置显式 min_price 时，应优先于环境折扣底线。"""
+    monkeypatch.setenv("DEFAULT_DISCOUNT_LIMIT", "0.50")
+    item_desc = '当前商品的信息如下：标题:iPad 价格:4299元 详情: {"original_price": 4299, "min_price": 3800}'
+
+    original_price, min_price, source = PriceAgent._extract_price_profile(item_desc)
+
+    assert original_price == 4299
+    assert min_price == 3800
+    assert source == "json"
+
+
+def test_invalid_discount_limit_falls_back(monkeypatch):
+    """错误折扣配置不能把底价算成 0 或高于原价。"""
+    monkeypatch.setenv("DEFAULT_DISCOUNT_LIMIT", "1.5")
+
+    original_price, min_price, source = PriceAgent._extract_price_profile("价格:4299元")
+
+    assert original_price == 4299
+    assert min_price == pytest.approx(3654.15)
+    assert source == "text_price+discount_limit"
+
+
+def test_offer_extraction_ignores_storage_numbers():
+    """规格数字在具体报价之前出现时，不应误判为买家出价。"""
+    offer = PriceAgent._extract_buyer_offer("128G 的话，3000 元能出吗", original_price=4299)
+
+    assert offer == 3000
 
 
 def test_price_commitment_memory_is_monotonic(tmp_path):

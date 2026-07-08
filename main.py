@@ -801,11 +801,17 @@ async def run_cli_mode():
             # 读取持久化的决策细节并呈现
             last_committed, buyer_highest = bot.db.get_price_commitments(chat_id)
             bargain_count = bot.db.get_bargain_count_by_chat(chat_id)
+            trace = bot.last_trace.to_dict()
+            guardrails = "、".join(trace.get("guardrails") or []) or "无"
+            price_decision = trace.get("price_decision") or {}
+            knowledge = trace.get("knowledge") or {}
 
             console.print(Panel(
                 f"[bold]识别意图[/bold]: {bot.last_intent}\n"
                 f"[bold]议价次数[/bold]: {bargain_count} 次\n"
-                f"[bold]价格承诺跟踪[/bold]: 我方承诺价格水位 [{last_committed if last_committed else '无'}] 元 | 买家最高出价 [{buyer_highest if buyer_highest else '无'}] 元",
+                f"[bold]已启用护栏[/bold]: {guardrails}\n"
+                f"[bold]价格承诺跟踪[/bold]: 我方承诺价格水位 [{last_committed if last_committed else '无'}] 元 | 买家最高出价 [{buyer_highest if buyer_highest else '无'}] 元\n"
+                f"[bold]定价来源[/bold]: {price_decision.get('price_source', '无')} | [bold]知识命中[/bold]: {knowledge.get('matched', '无')}",
                 title="⚙️ 决策状态监控 (二开新增)",
                 border_style="yellow",
                 expand=False

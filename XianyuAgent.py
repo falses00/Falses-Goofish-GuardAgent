@@ -1,12 +1,13 @@
-import re
-import os
 import json
-from typing import List, Dict, Optional, Tuple
+import os
+import re
+from typing import Any, Dict, List, Tuple
 from openai import OpenAI
 from loguru import logger
 
 # 引入二开新增专家模块与上下文数据库
 from core.experts import BargainExpert, FAQExpert
+from core.observability import AgentTrace
 from context_manager import ChatContextManager
 
 
@@ -28,6 +29,7 @@ class XianyuReplyBot:
         self._init_agents()
         self.router = IntentRouter(self.agents['classify'])
         self.last_intent = None  # 记录最后一次意图
+        self.last_trace = AgentTrace()
 
     def _init_agents(self):
         """初始化各领域 Agent (注入了数据库实例 self.db)"""
@@ -79,6 +81,7 @@ class XianyuReplyBot:
         生成回复主流程（扩展了 chat_id 参数以支持会话级报价跟踪）
         """
         formatted_context = self.format_history(context)
+        self.last_trace = AgentTrace(chat_id=chat_id, user_msg=user_msg)
 
         # 1. 三级意图分类路由决策
         detected_intent = self.router.detect(user_msg, item_desc, formatted_context)
@@ -88,6 +91,10 @@ class XianyuReplyBot:
         if detected_intent == 'no_reply':
             logger.info(f"意图识别完成: no_reply - 无需回复")
             self.last_intent = 'no_reply'
+            self.last_trace.intent = 'no_reply'
+            self.last_trace.routed_agent = 'none'
+            self.last_trace.no_reply = True
+            logger.info(f"[AgentTrace] {json.dumps(self.last_trace.to_dict(), ensure_ascii=False)}")
             return "-"  # 返回特殊标记，表示无需回复
 
         elif detected_intent in self.agents and detected_intent not in internal_intents:
@@ -104,13 +111,22 @@ class XianyuReplyBot:
         logger.info(f"会话 {chat_id} 历史议价次数: {bargain_count}")
 
         # 3. 驱动对应 Agent 生成最终润色回复
-        return agent.generate(
+        reply = agent.generate(
             user_msg=user_msg,
             item_desc=item_desc,
             context=formatted_context,
             bargain_count=bargain_count,
             chat_id=chat_id
         )
+        self.last_trace.intent = self.last_intent
+        self.last_trace.routed_agent = agent.__class__.__name__
+        self.last_trace.bargain_count = bargain_count
+        agent_trace = getattr(agent, "last_trace", {})
+        self.last_trace.guardrails = agent_trace.get("guardrails", [])
+        self.last_trace.price_decision = agent_trace.get("price_decision", {})
+        self.last_trace.knowledge = agent_trace.get("knowledge", {})
+        logger.info(f"[AgentTrace] {json.dumps(self.last_trace.to_dict(), ensure_ascii=False)}")
+        return reply
 
     def reload_prompts(self):
         """重新加载所有提示词"""
@@ -174,6 +190,7 @@ class BaseAgent:
         self.system_prompt = system_prompt
         self.safety_filter = safety_filter
         self.db = db
+        self.last_trace = {}
 
     def generate(self, user_msg: str, item_desc: str, context: str, bargain_count: int = 0, chat_id: str = None) -> str:
         """生成回复的模板方法"""
@@ -206,45 +223,41 @@ class PriceAgent(BaseAgent):
     不再只是调整大模型温度，而是强制集成“议价卫士”数值安全护栏和 SQLite 价格记忆。
     """
     def generate(self, user_msg: str, item_desc: str, context: str, bargain_count: int = 0, chat_id: str = None) -> str:
-        # 1. 尝试从商品详情中动态提取当前定价
-        original_price = 100.0
-        price_match = re.search(r'价格[:：]\s*(\d+)', item_desc)
-        if price_match:
-            original_price = float(price_match.group(1))
-        else:
-            # 兼容非标准描述，直接匹配第一个独立大数字
-            digits = re.findall(r'\b\d{3,5}\b', item_desc)
-            if digits:
-                original_price = float(digits[0])
+        # 1. 尝试从商品详情中动态提取当前定价与底价策略
+        original_price, min_price, price_source = self._extract_price_profile(item_desc)
 
-        # 2. 从环境变量中计算最低容忍价格 (Guarails)
-        discount_limit = float(os.getenv("DEFAULT_DISCOUNT_LIMIT", "0.85"))
-        min_price = original_price * discount_limit
-
-        # 3. 实例化议价专家决策内核
+        # 2. 实例化议价专家决策内核
         expert = BargainExpert(original_price, min_price)
 
-        # 4. 从 SQLite 读取历史承诺
+        # 3. 从 SQLite 读取历史承诺
         last_committed, buyer_highest = self.db.get_price_commitments(chat_id)
 
-        # 5. 从用户输入中提取买家具体出价数字
-        buyer_offer = None
-        offer_match = re.search(r'(\d+)\s*元?', user_msg)
-        if offer_match:
-            val = float(offer_match.group(1))
-            # 排除年份、内存大小等常见非出价数字干扰
-            if val < original_price * 1.5 and val > 100:
-                buyer_offer = val
+        # 4. 从用户输入中提取买家具体出价数字
+        buyer_offer = self._extract_buyer_offer(user_msg, original_price)
 
-        # 6. 运行算法，计算出我方的出价决策
+        # 5. 运行算法，计算出我方的出价决策
         decision = expert.calculate_next_price(buyer_offer, last_committed)
         calculated_price = decision["price"]
         action = decision["action"]
         reason = decision["reason"]
 
+        self.last_trace = {
+            "guardrails": ["pricing_floor", "no_price_raise_after_commitment"],
+            "price_decision": {
+                "original_price": original_price,
+                "min_price": min_price,
+                "price_source": price_source,
+                "buyer_offer": buyer_offer,
+                "last_committed": last_committed,
+                "buyer_highest": buyer_highest,
+                "calculated_price": calculated_price,
+                "action": action,
+                "reason": reason,
+            },
+        }
         logger.info(f"[议价卫士决策] 动作: {action} | 建议报价: {calculated_price} | 推理原因: {reason}")
 
-        # 7. 更新持久化数据库中的报价承诺
+        # 6. 更新持久化数据库中的报价承诺
         self.db.update_price_commitments(
             chat_id,
             lowest_price_committed=calculated_price,
@@ -267,6 +280,93 @@ class PriceAgent(BaseAgent):
         dynamic_temp = self._calc_temperature(bargain_count)
         response_text = self._call_llm(messages, temperature=dynamic_temp)
         return self.safety_filter(response_text)
+
+    @staticmethod
+    def _extract_json_payload(item_desc: str) -> Dict[str, Any]:
+        """Extract the embedded JSON object from item descriptions when present."""
+        start = item_desc.find("{")
+        if start == -1:
+            return {}
+        try:
+            return json.loads(item_desc[start:])
+        except json.JSONDecodeError:
+            logger.warning("商品描述中包含 JSON 起始符，但解析失败，降级使用文本价格提取")
+            return {}
+
+    @classmethod
+    def _extract_price_profile(cls, item_desc: str) -> Tuple[float, float, str]:
+        """Return original price, minimum acceptable price, and source label."""
+        payload = cls._extract_json_payload(item_desc)
+        original_price = cls._coerce_float(payload.get("original_price") or payload.get("price"))
+        min_price = cls._coerce_float(payload.get("min_price"))
+        source = "json"
+
+        if original_price is None:
+            price_range = payload.get("price_range") if payload else None
+            original_price = cls._extract_first_price(str(price_range or ""))
+            source = "json_price_range"
+
+        if original_price is None:
+            price_match = re.search(r'价格[:：]\s*(\d+(?:\.\d+)?)', item_desc)
+            if price_match:
+                original_price = float(price_match.group(1))
+                source = "text_price"
+
+        if original_price is None:
+            original_price = cls._extract_first_price(item_desc) or 100.0
+            source = "text_fallback"
+
+        discount_limit = cls._load_discount_limit()
+        if min_price is None or min_price <= 0 or min_price > original_price:
+            min_price = original_price * discount_limit
+            source = f"{source}+discount_limit"
+
+        return float(original_price), float(min_price), source
+
+    @staticmethod
+    def _coerce_float(value: Any) -> float:
+        try:
+            if value is None or value == "":
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _extract_first_price(text: str) -> float:
+        match = re.search(r'(?:￥|¥)?\s*(\d+(?:\.\d+)?)\s*(?:元|块|rmb)?', text.lower())
+        if not match:
+            return None
+        return float(match.group(1))
+
+    @staticmethod
+    def _load_discount_limit() -> float:
+        raw_limit = os.getenv("DEFAULT_DISCOUNT_LIMIT", "0.85")
+        try:
+            discount_limit = float(raw_limit)
+        except ValueError:
+            logger.warning(f"DEFAULT_DISCOUNT_LIMIT={raw_limit} 无效，已回退为 0.85")
+            return 0.85
+        if not 0 < discount_limit <= 1:
+            logger.warning(f"DEFAULT_DISCOUNT_LIMIT={raw_limit} 越界，已回退为 0.85")
+            return 0.85
+        return discount_limit
+
+    @staticmethod
+    def _extract_buyer_offer(user_msg: str, original_price: float) -> float:
+        explicit_price = re.search(r'(?:￥|¥)?\s*(\d+(?:\.\d+)?)\s*(?:元|块|rmb)', user_msg.lower())
+        if explicit_price:
+            value = float(explicit_price.group(1))
+            if 100 < value < original_price * 1.5:
+                return value
+
+        for match in re.finditer(r'\b(\d+(?:\.\d+)?)\b', user_msg):
+            value = float(match.group(1))
+            if max(300, original_price * 0.2) < value < original_price * 1.5:
+                if 1900 <= value <= 2100:
+                    continue
+                return value
+        return None
 
     def _calc_temperature(self, bargain_count: int) -> float:
         """动态温度策略，控制多轮拉锯时的语义多样性"""
@@ -294,7 +394,19 @@ class TechAgent(BaseAgent):
         if product_info:
             faq_expert = FAQExpert(product_info)
             kb_context = faq_expert.extract_related_kb(user_msg)
-            logger.info(f"[RAG FAQ 匹配成功] 命中属性: {kb_context}")
+            if kb_context:
+                logger.info(f"[RAG FAQ 匹配成功] 命中属性: {kb_context}")
+            else:
+                logger.info("[RAG FAQ 未命中] 使用商品描述和通用提示词兜底")
+
+        self.last_trace = {
+            "guardrails": ["truthful_product_facts"] if kb_context else [],
+            "knowledge": {
+                "source": info_path if product_info else None,
+                "matched": bool(kb_context),
+                "context": kb_context,
+            },
+        }
 
         messages = self._build_messages(user_msg, item_desc, context)
 

@@ -1,1 +1,1 @@
-"""Core decision experts for Falses Goofish GuardAgent."""
+"""Core decision and observability modules for Falses Goofish GuardAgent."""

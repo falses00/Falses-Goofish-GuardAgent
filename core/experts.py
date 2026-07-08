@@ -1,6 +1,5 @@
-import json
 from typing import Dict, Any, Optional
-from loguru import logger
+
 
 class BargainExpert:
     """
@@ -143,5 +142,5 @@ class FAQExpert:
             matched.append(f"【转让原因】: {self.product_info.get('faq', {}).get('reason_for_selling')}")
 
         if not matched:
-            return "无匹配特定参数模块，请根据完整商品基本信息回复。"
+            return ""
         return "\n".join(matched)

@@ -21,6 +21,7 @@
 - **LLM 负责表达**：把回复写得自然、像真人卖家。
 - **规则负责底线**：价格、承诺、商品事实由确定性代码控制。
 - **SQLite 负责记忆**：多轮会话中记录历史报价和买家最高出价。
+- **Trace 负责解释**：每轮回复记录路由、护栏、定价来源和知识命中。
 - **本地模式负责调试**：不接入闲鱼也能复现议价和咨询链路。
 
 ## 核心特性
@@ -68,6 +69,16 @@ python main.py --mode xianyu
 
 该模式需要 `COOKIES_STR`，用于连接闲鱼 / Goofish WebSocket 并自动处理消息。仍建议先用 CLI 模式验证商品数据、提示词和价格策略。
 
+### 6. AgentTrace 可观测链路
+
+每轮回复都会生成 `AgentTrace`，记录：
+
+- `intent`：识别到的用户意图。
+- `routed_agent`：实际处理的 Agent。
+- `guardrails`：启用的护栏，例如价格底线、历史承诺不抬价、商品事实约束。
+- `price_decision`：原价、底价、底价来源、买家报价、历史承诺和最终动作。
+- `knowledge`：商品知识库是否命中，以及注入了哪些事实。
+
 ## 项目结构
 
 ```text
@@ -78,9 +89,13 @@ XianyuAutoAgent/
 ├── context_manager.py          # SQLite 会话历史、议价次数、价格承诺记忆
 ├── core/
 │   ├── __init__.py
-│   └── experts.py              # BargainExpert 与 FAQExpert
+│   ├── experts.py              # BargainExpert 与 FAQExpert
+│   └── observability.py        # AgentTrace 可观测结构
 ├── data/
 │   └── product_info.json       # 示例商品知识库
+├── docs/
+│   ├── AGENT_DESIGN_NOTES.md
+│   └── RESUME_PROJECT_EXPERIENCE.md
 ├── prompts/                    # 提示词模板，正式提示词默认不入库
 ├── tests/
 │   └── test_agents.py          # 核心策略单元测试
@@ -172,7 +187,14 @@ pytest tests/test_agents.py -q
 - 合理区间出价的折中策略。
 - 接近底线时直接成交。
 - 历史承诺价不被抬高。
+- 商品级 `min_price` 优先于环境折扣。
+- 无效折扣配置自动回退。
+- 规格数字不误判成买家报价。
 - 商品知识库关键词命中。
+
+## 简历项目经历
+
+可直接参考 [docs/RESUME_PROJECT_EXPERIENCE.md](docs/RESUME_PROJECT_EXPERIENCE.md)，里面包含项目描述、技术栈、简历 bullet、面试讲述版本和可量化表达。
 
 ## 配置项
 
