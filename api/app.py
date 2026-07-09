@@ -7,6 +7,7 @@ from fastapi import FastAPI, Query
 from pydantic import BaseModel, Field
 
 from core.evaluation import DeterministicLLMClient
+from core.model_provider import has_model_api_key
 from core.trace_store import JsonlTraceStore
 from XianyuAgent import XianyuReplyBot
 
@@ -43,8 +44,9 @@ class ReplyResponse(BaseModel):
 def _is_offline_mode() -> bool:
     explicit_value = os.getenv("API_OFFLINE_MODE")
     if explicit_value is not None:
-        return explicit_value.lower() in {"1", "true", "yes", "on"}
-    return not bool(os.getenv("API_KEY"))
+        requested_offline = explicit_value.lower() in {"1", "true", "yes", "on"}
+        return requested_offline or not has_model_api_key()
+    return not has_model_api_key()
 
 
 def _load_default_item_info() -> Dict[str, Any]:

@@ -23,15 +23,16 @@ Falses Goofish GuardAgent：闲鱼二手交易 AI 客服与议价安全 Agent
 
 ### 项目描述
 
-基于 Python、OpenAI-compatible LLM、FastAPI、WebSocket、SQLite 与 Rich CLI 构建闲鱼 / Goofish AI 客服 Agent，在原有自动回复项目基础上重构决策链路，引入多 Agent 路由、确定性议价护栏、商品事实 RAG、会话状态记忆、可观测 Trace 和离线评测体系，支持本地 Mock 调试、HTTP 服务化集成与真实闲鱼长连接挂机。
+基于 Python、Agnes AI / OpenAI-compatible LLM、FastAPI、WebSocket、SQLite 与 Rich CLI 构建闲鱼 / Goofish AI 客服 Agent，在原有自动回复项目基础上重构决策链路，引入多 Agent 路由、确定性议价护栏、商品事实 RAG、会话状态记忆、可观测 Trace 和离线评测体系，支持本地 Mock 调试、HTTP 服务化集成与真实闲鱼长连接挂机。
 
 ### 技术栈
 
-Python、FastAPI、OpenAI SDK、WebSocket、SQLite、pytest、Rich CLI、Prompt Engineering、Agent Routing、Guardrails、RAG-lite、Agent Evaluation、Observability
+Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、pytest、Rich CLI、Prompt Engineering、Agent Routing、Guardrails、RAG-lite、Agent Evaluation、Observability
 
 ### 简历 Bullet
 
 - 二次开发闲鱼 AI 客服系统，重构为 `IntentRouter -> PriceAgent / TechAgent / DefaultAgent -> Guardrails -> LLM` 的多 Agent 决策链路，实现咨询、议价、闲聊等场景的可控分发。
+- 抽象 `model_provider` 配置层，默认接入 Agnes AI 的 OpenAI-compatible Chat Completions API，同时保留 `API_KEY / MODEL_BASE_URL / MODEL_NAME` 兼容路径，降低后续模型切换成本。
 - 设计 `BargainExpert` 确定性议价策略，将价格底线、历史承诺价、买家最高出价从 LLM Prompt 中剥离为代码级约束，避免模型被诱导突破底价或前后报价不一致。
 - 基于 SQLite 实现会话级状态记忆，持久化聊天历史、议价次数、我方最低承诺价和买家最高出价；通过事务化 `append_turn` 原子写入用户消息、助手回复和议价次数，避免半轮上下文污染，并采用单调更新策略保证价格承诺只降不升、买家报价只取最高。
 - 引入 JSON 商品知识库与 `FAQExpert`，针对成色、拆修、配件、物流、面交等高风险问题注入事实上下文，降低 LLM 编造商品信息导致售后纠纷的风险。

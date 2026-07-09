@@ -114,6 +114,7 @@ Falses-Goofish-GuardAgent/
 ├── core/
 │   ├── __init__.py
 │   ├── experts.py              # BargainExpert 与 FAQExpert
+│   ├── model_provider.py       # Agnes / OpenAI-compatible 模型配置
 │   ├── observability.py        # AgentTrace 可观测结构
 │   ├── evaluation.py           # 离线 LLM stub 与 Agent 评测 harness
 │   └── trace_store.py          # JSONL trace 持久化与回放
@@ -165,15 +166,19 @@ copy .env.example .env
 最少需要填写：
 
 ```ini
-API_KEY=your_api_key_here
-MODEL_BASE_URL=https://api.deepseek.com/v1
-MODEL_NAME=deepseek-chat
+MODEL_PROVIDER=agnes
+AGNES_API_KEY=your_agnes_api_key_here
+AGNES_BASE_URL=https://apihub.agnes-ai.com/v1
+AGNES_MODEL_NAME=agnes-2.0-flash
 DEFAULT_DISCOUNT_LIMIT=0.85
 ```
 
-如果使用 Ollama 或其他 OpenAI-compatible 本地模型，可改成：
+Agnes 官方文档说明其 API 兼容 OpenAI 风格接口，请求使用 `Authorization: Bearer YOUR_API_KEY`，Base URL 为 `https://apihub.agnes-ai.com/v1`，文本模型可使用 `agnes-2.0-flash`。
+
+如果使用 Ollama、DeepSeek 或其他 OpenAI-compatible 模型，可改成：
 
 ```ini
+MODEL_PROVIDER=custom
 API_KEY=ollama
 MODEL_BASE_URL=http://127.0.0.1:11434/v1
 MODEL_NAME=qwen2.5:7b-instruct
@@ -208,7 +213,7 @@ $env:API_OFFLINE_MODE="true"
 uvicorn api.app:app --host 127.0.0.1 --port 8000
 ```
 
-浏览器打开 `http://127.0.0.1:8000/docs` 可以直接调试接口。离线模式适合演示和 CI；真实模型模式需要配置 `API_KEY`、`MODEL_BASE_URL` 和 `MODEL_NAME`。
+浏览器打开 `http://127.0.0.1:8000/docs` 可以直接调试接口。离线模式适合演示和 CI；真实模型模式默认需要配置 `AGNES_API_KEY`，也可通过 `API_KEY`、`MODEL_BASE_URL` 和 `MODEL_NAME` 接入其它 OpenAI-compatible 服务。
 
 ### 5. 闲鱼挂机运行
 
@@ -268,9 +273,13 @@ python tools/run_agent_eval.py --min-score 1.0
 
 | 变量 | 说明 |
 | --- | --- |
-| `API_KEY` | OpenAI-compatible 模型服务密钥 |
-| `MODEL_BASE_URL` | 模型 API base URL |
-| `MODEL_NAME` | 模型名称 |
+| `MODEL_PROVIDER` | 模型提供商，默认 `agnes`；其它 OpenAI-compatible 服务可设为 `custom` |
+| `AGNES_API_KEY` | Agnes API 密钥，默认优先读取此变量 |
+| `AGNES_BASE_URL` | Agnes API base URL，默认 `https://apihub.agnes-ai.com/v1` |
+| `AGNES_MODEL_NAME` | Agnes 文本模型名称，默认 `agnes-2.0-flash` |
+| `API_KEY` | 通用 OpenAI-compatible 模型服务密钥，兼容旧配置 |
+| `MODEL_BASE_URL` | 通用模型 API base URL，兼容旧配置 |
+| `MODEL_NAME` | 通用模型名称，兼容旧配置 |
 | `COOKIES_STR` | 闲鱼 / Goofish 网页端 Cookie，仅 xianyu 模式需要 |
 | `DEFAULT_DISCOUNT_LIMIT` | 最低折扣比例，例如 `0.85` 表示最多降到 8.5 折 |
 | `API_OFFLINE_MODE` | API 服务是否使用离线 deterministic LLM，演示 / CI 可设为 `true` |

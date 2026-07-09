@@ -2,11 +2,11 @@ import json
 import os
 import re
 from typing import Any, Dict, List, Tuple
-from openai import OpenAI
 from loguru import logger
 
 # 引入二开新增专家模块与上下文数据库
 from core.experts import BargainExpert, FAQExpert
+from core.model_provider import create_model_client, get_model_name
 from core.observability import AgentTrace
 from context_manager import ChatContextManager
 
@@ -17,11 +17,8 @@ class XianyuReplyBot:
     保持原有外部调用接口不变，内部注入多智能体专家协同、议价安全护栏 (Guardrails) 与 SQLite 持久化会话记忆。
     """
     def __init__(self, client=None, db_path=None):
-        # 初始化 OpenAI 客户端
-        self.client = client or OpenAI(
-            api_key=os.getenv("API_KEY"),
-            base_url=os.getenv("MODEL_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-        )
+        # 初始化 OpenAI-compatible 客户端，默认接入 Agnes AI
+        self.client = client or create_model_client()
         # 初始化持久化数据库管理器，用于跟踪报价承诺
         self.db = ChatContextManager(db_path=db_path or os.getenv("CHAT_DB_PATH", "data/chat_history.db"))
 
@@ -208,7 +205,7 @@ class BaseAgent:
     def _call_llm(self, messages: List[Dict], temperature: float = 0.4) -> str:
         """调用大模型"""
         response = self.client.chat.completions.create(
-            model=os.getenv("MODEL_NAME", "deepseek-chat"),
+            model=get_model_name(),
             messages=messages,
             temperature=temperature,
             max_tokens=500,

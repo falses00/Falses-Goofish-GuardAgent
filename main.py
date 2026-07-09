@@ -15,6 +15,7 @@ import random
 from utils.xianyu_utils import generate_mid, generate_uuid, trans_cookies, generate_device_id, decrypt
 from XianyuAgent import XianyuReplyBot
 from context_manager import ChatContextManager
+from core.model_provider import has_model_api_key
 
 
 class XianyuLive:
@@ -928,11 +929,6 @@ def run_smoke_mode():
 def check_and_complete_env():
     """检查并补全关键环境变量"""
     placeholder_values = {
-        "API_KEY": {
-            "your_api_key_here",
-            "your_apikey_here",
-            "默认使用通义千问,apikey通过百炼模型平台获取",
-        },
         "COOKIES_STR": {"your_cookies_here"},
     }
 
@@ -958,6 +954,24 @@ def check_and_complete_env():
                     break
                 else:
                     print(f"{key} 不能为空，请重新输入")
+
+    if not has_model_api_key():
+        logger.warning("未配置模型 API Key，请输入 Agnes API Key")
+        while True:
+            val = input("请输入 AGNES_API_KEY: ").strip()
+            if val:
+                os.environ["AGNES_API_KEY"] = val
+                try:
+                    if not os.path.exists(env_path):
+                        with open(env_path, 'w', encoding='utf-8') as f:
+                            pass
+                    set_key(env_path, "AGNES_API_KEY", val)
+                    updated = True
+                except Exception as e:
+                    logger.warning(f"无法自动写入.env文件: {e}")
+                break
+            else:
+                print("AGNES_API_KEY 不能为空，请重新输入")
     if updated:
         logger.info("新的配置已保存/更新至 .env 文件中")
 
@@ -997,16 +1011,16 @@ if __name__ == '__main__':
 
     # 4. 根据模式分支执行
     if args.mode == "cli":
-        # 本地调试模式下，如果未配 API_KEY，引导输入
-        if not os.getenv("API_KEY") or os.getenv("API_KEY") in {"your_api_key_here", "your_apikey_here"}:
-            logger.warning("未配置 API_KEY，请先输入 API_KEY 以使用大模型进行交互：")
-            api_key = input("API_KEY: ").strip()
+        # 本地调试模式下，如果未配模型 API Key，引导输入。默认会写入 AGNES_API_KEY。
+        if not has_model_api_key():
+            logger.warning("未配置模型 API Key，请先输入 Agnes API Key 以使用大模型进行交互：")
+            api_key = input("AGNES_API_KEY: ").strip()
             if api_key:
-                os.environ["API_KEY"] = api_key
+                os.environ["AGNES_API_KEY"] = api_key
                 if os.path.exists(".env"):
-                    set_key(".env", "API_KEY", api_key)
+                    set_key(".env", "AGNES_API_KEY", api_key)
             else:
-                logger.error("API_KEY 不能为空，程序退出。")
+                logger.error("模型 API Key 不能为空，程序退出。")
                 sys.exit(1)
 
         # 启动异步本地 CLI 对话终端

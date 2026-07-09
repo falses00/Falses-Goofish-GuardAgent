@@ -6,6 +6,7 @@ import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from core.experts import BargainExpert, FAQExpert
+from core.model_provider import AGNES_BASE_URL, AGNES_MODEL_NAME, has_model_api_key, resolve_model_config
 from context_manager import ChatContextManager
 from XianyuAgent import IntentRouter, PriceAgent
 
@@ -223,3 +224,33 @@ def test_append_turn_trims_history_by_chat(tmp_path):
     assert len(snapshot.messages) == 3
     assert snapshot.messages[0]["content"] == "消息 1"
     assert snapshot.messages[-1]["content"] == "消息 3"
+
+
+def test_agnes_provider_is_default(monkeypatch):
+    """默认模型提供商应指向 Agnes 的 OpenAI-compatible API。"""
+    for key in [
+        "MODEL_PROVIDER",
+        "AGNES_API_KEY",
+        "AGNES_BASE_URL",
+        "AGNES_MODEL_NAME",
+        "API_KEY",
+        "MODEL_BASE_URL",
+        "MODEL_NAME",
+    ]:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("AGNES_API_KEY", "test-agnes-key")
+
+    config = resolve_model_config()
+
+    assert config.provider == "agnes"
+    assert config.api_key == "test-agnes-key"
+    assert config.base_url == AGNES_BASE_URL
+    assert config.model_name == AGNES_MODEL_NAME
+
+
+def test_placeholder_model_api_key_is_not_treated_as_configured(monkeypatch):
+    """示例占位符不能让 API 服务误以为已配置真实密钥。"""
+    monkeypatch.delenv("AGNES_API_KEY", raising=False)
+    monkeypatch.setenv("API_KEY", "your_api_key_here")
+
+    assert has_model_api_key() is False

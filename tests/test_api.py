@@ -88,3 +88,17 @@ def test_empty_user_message_is_rejected(tmp_path):
     )
 
     assert response.status_code == 422
+
+
+def test_api_falls_back_to_offline_when_key_is_placeholder(tmp_path, monkeypatch):
+    monkeypatch.setenv("API_OFFLINE_MODE", "false")
+    monkeypatch.setenv("AGNES_API_KEY", "your_agnes_api_key_here")
+    monkeypatch.delenv("API_KEY", raising=False)
+
+    app = create_app(
+        db_path=str(tmp_path / "api_chat_history.db"),
+        trace_path=str(tmp_path / "agent_traces.jsonl"),
+    )
+    client = TestClient(app)
+
+    assert client.get("/health").json()["offline_mode"] is True
