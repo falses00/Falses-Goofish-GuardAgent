@@ -15,6 +15,7 @@ import random
 from utils.xianyu_utils import generate_mid, generate_uuid, trans_cookies, generate_device_id, decrypt
 from XianyuAgent import XianyuReplyBot
 from context_manager import ChatContextManager
+from core.message_aggregation import MessageAggregator
 from core.model_provider import has_model_api_key
 
 
@@ -52,6 +53,13 @@ class XianyuLive:
 
         # 消息过期时间配置
         self.message_expire_time = int(os.getenv("MESSAGE_EXPIRE_TIME", "300000"))  # 消息过期时间，默认5分钟
+        self.message_aggregation_enabled = os.getenv("MESSAGE_AGGREGATION_ENABLED", "true").lower() == "true"
+        self.message_aggregator = MessageAggregator(
+            debounce_seconds=float(os.getenv("MESSAGE_AGGREGATION_WINDOW_SECONDS", "1.2")),
+            max_messages=int(os.getenv("MESSAGE_AGGREGATION_MAX_MESSAGES", "5")),
+            max_chars=int(os.getenv("MESSAGE_AGGREGATION_MAX_CHARS", "1200")),
+        )
+        self.message_flush_tasks = {}
 
         # 人工接管关键词，从环境变量读取
         self.toggle_keywords = os.getenv("TOGGLE_KEYWORDS", "。")
@@ -355,6 +363,150 @@ class XianyuLive:
 
         return json.dumps(summary, ensure_ascii=False)
 
+    async def _process_buyer_message(
+        self,
+        websocket,
+        chat_id,
+        send_user_id,
+        item_id,
+        send_message,
+        send_user_name="买家",
+        aggregation_count=1,
+    ):
+        # 从数据库中获取商品信息，如果不存在则从API获取并保存
+        item_info = self.context_manager.get_item_info(item_id)
+        if not item_info:
+            logger.info(f"从API获取商品信息: {item_id}")
+            api_result = self.xianyu.get_item_info(item_id)
+            if 'data' in api_result and 'itemDO' in api_result['data']:
+                item_info = api_result['data']['itemDO']
+                self.context_manager.save_item_info(item_id, item_info)
+            else:
+                logger.warning(f"获取商品信息失败: {api_result}")
+                return
+        else:
+            logger.info(f"从数据库获取商品信息: {item_id}")
+
+        item_description = f"当前商品的信息如下：{self.build_item_description(item_info)}"
+
+        context = self.context_manager.get_context_by_chat(chat_id)
+        bot_reply = bot.generate_reply(
+            send_message,
+            item_description,
+            context=context,
+            chat_id=chat_id
+        )
+
+        if aggregation_count > 1:
+            logger.info(f"已将 {aggregation_count} 条连续买家消息聚合为 1 次 Agent 决策: chat_id={chat_id}")
+
+        # 检查是否需要回复
+        if bot_reply == "-":
+            logger.info(f"[无需回复] 用户 {send_user_name} 的消息被识别为无需回复类型")
+            self.context_manager.append_turn(
+                chat_id,
+                send_user_id,
+                item_id,
+                send_message,
+                self.myid,
+                assistant_text=None,
+                intent=bot.last_intent
+            )
+            return
+
+        self.context_manager.append_turn(
+            chat_id,
+            send_user_id,
+            item_id,
+            send_message,
+            self.myid,
+            assistant_text=bot_reply,
+            intent=bot.last_intent
+        )
+        if bot.last_intent == "price":
+            bargain_count = self.context_manager.get_bargain_count_by_chat(chat_id)
+            logger.info(f"用户 {send_user_name} 对商品 {item_id} 的议价次数: {bargain_count}")
+
+        logger.info(f"机器人回复: {bot_reply}")
+
+        # 模拟人工输入延迟
+        if self.simulate_human_typing:
+            base_delay = random.uniform(0, 1)
+            typing_delay = len(bot_reply) * random.uniform(0.1, 0.3)
+            total_delay = min(base_delay + typing_delay, 10.0)
+            logger.info(f"模拟人工输入，延迟发送 {total_delay:.2f} 秒...")
+            await asyncio.sleep(total_delay)
+
+        await self.send_msg(websocket, chat_id, send_user_id, bot_reply)
+
+    async def _flush_aggregated_buyer_message_after_delay(self, key, websocket, send_user_name, delay_seconds):
+        try:
+            if delay_seconds > 0:
+                await asyncio.sleep(delay_seconds)
+            batch = self.message_aggregator.pop(key)
+            if not batch:
+                return
+            await self._process_buyer_message(
+                websocket,
+                batch.chat_id,
+                batch.user_id,
+                batch.item_id,
+                batch.combined_text(),
+                send_user_name=send_user_name,
+                aggregation_count=batch.count,
+            )
+        except asyncio.CancelledError:
+            raise
+        finally:
+            current_task = asyncio.current_task()
+            if self.message_flush_tasks.get(key) is current_task:
+                self.message_flush_tasks.pop(key, None)
+
+    async def _enqueue_or_process_buyer_message(
+        self,
+        websocket,
+        chat_id,
+        send_user_id,
+        item_id,
+        send_message,
+        send_user_name,
+        create_time,
+    ):
+        if not self.message_aggregation_enabled:
+            await self._process_buyer_message(
+                websocket,
+                chat_id,
+                send_user_id,
+                item_id,
+                send_message,
+                send_user_name=send_user_name,
+            )
+            return
+
+        key, should_flush = self.message_aggregator.append(
+            chat_id=chat_id,
+            item_id=item_id,
+            user_id=send_user_id,
+            text=send_message,
+            now_ms=create_time,
+        )
+        existing_task = self.message_flush_tasks.pop(key, None)
+        if existing_task:
+            existing_task.cancel()
+        delay_seconds = 0 if should_flush else self.message_aggregator.debounce_seconds
+        self.message_flush_tasks[key] = asyncio.create_task(
+            self._flush_aggregated_buyer_message_after_delay(
+                key,
+                websocket,
+                send_user_name,
+                delay_seconds,
+            )
+        )
+        logger.info(
+            f"消息已进入聚合窗口: chat_id={chat_id}, item_id={item_id}, "
+            f"delay={delay_seconds:.2f}s, force_flush={should_flush}"
+        )
+
     async def handle_message(self, message_data, websocket):
         """处理所有类型的消息"""
         try:
@@ -490,75 +642,15 @@ class XianyuLive:
             if self.is_system_message(message):
                 logger.debug("系统消息，跳过处理")
                 return
-            # 从数据库中获取商品信息，如果不存在则从API获取并保存
-            item_info = self.context_manager.get_item_info(item_id)
-            if not item_info:
-                logger.info(f"从API获取商品信息: {item_id}")
-                api_result = self.xianyu.get_item_info(item_id)
-                if 'data' in api_result and 'itemDO' in api_result['data']:
-                    item_info = api_result['data']['itemDO']
-                    # 保存商品信息到数据库
-                    self.context_manager.save_item_info(item_id, item_info)
-                else:
-                    logger.warning(f"获取商品信息失败: {api_result}")
-                    return
-            else:
-                logger.info(f"从数据库获取商品信息: {item_id}")
-
-            item_description=f"当前商品的信息如下：{self.build_item_description(item_info)}"
-
-            # 获取完整的对话上下文
-            context = self.context_manager.get_context_by_chat(chat_id)
-            # 生成回复
-            bot_reply = bot.generate_reply(
-                send_message,
-                item_description,
-                context=context,
-                chat_id=chat_id
-            )
-
-            # 检查是否需要回复
-            if bot_reply == "-":
-                logger.info(f"[无需回复] 用户 {send_user_name} 的消息被识别为无需回复类型")
-                self.context_manager.append_turn(
-                    chat_id,
-                    send_user_id,
-                    item_id,
-                    send_message,
-                    self.myid,
-                    assistant_text=None,
-                    intent=bot.last_intent
-                )
-                return
-
-            self.context_manager.append_turn(
+            await self._enqueue_or_process_buyer_message(
+                websocket,
                 chat_id,
                 send_user_id,
                 item_id,
                 send_message,
-                self.myid,
-                assistant_text=bot_reply,
-                intent=bot.last_intent
+                send_user_name,
+                create_time,
             )
-            if bot.last_intent == "price":
-                bargain_count = self.context_manager.get_bargain_count_by_chat(chat_id)
-                logger.info(f"用户 {send_user_name} 对商品 {item_id} 的议价次数: {bargain_count}")
-
-            logger.info(f"机器人回复: {bot_reply}")
-
-            # 模拟人工输入延迟
-            if self.simulate_human_typing:
-                # 基础延迟 0-1秒 + 每字 0.1-0.3秒
-                base_delay = random.uniform(0, 1)
-                typing_delay = len(bot_reply) * random.uniform(0.1, 0.3)
-                total_delay = base_delay + typing_delay
-                # 设置最大延迟上限，防止过长回复等待太久
-                total_delay = min(total_delay, 10.0)
-
-                logger.info(f"模拟人工输入，延迟发送 {total_delay:.2f} 秒...")
-                await asyncio.sleep(total_delay)
-
-            await self.send_msg(websocket, chat_id, send_user_id, bot_reply)
 
         except Exception as e:
             logger.error(f"处理消息时发生错误: {str(e)}")
@@ -709,6 +801,13 @@ class XianyuLive:
                         await self.token_refresh_task
                     except asyncio.CancelledError:
                         pass
+
+                if self.message_flush_tasks:
+                    pending_flush_tasks = list(self.message_flush_tasks.values())
+                    for task in pending_flush_tasks:
+                        task.cancel()
+                    await asyncio.gather(*pending_flush_tasks, return_exceptions=True)
+                    self.message_flush_tasks.clear()
 
                 # 如果是主动重启，立即重连；否则等待5秒
                 if self.connection_restart_flag:

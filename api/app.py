@@ -7,6 +7,7 @@ from fastapi import FastAPI, Query
 from pydantic import BaseModel, Field
 
 from core.evaluation import DeterministicLLMClient
+from core.message_aggregation import MessageBatch
 from core.model_provider import has_model_api_key
 from core.trace_store import JsonlTraceStore
 from XianyuAgent import XianyuReplyBot
@@ -17,6 +18,7 @@ DEFAULT_PRODUCT_INFO_PATH = Path("data/product_info.json")
 
 class ReplyRequest(BaseModel):
     user_msg: str = Field(..., min_length=1)
+    additional_user_msgs: List[str] = Field(default_factory=list)
     chat_id: str = Field("api_chat_001", min_length=1)
     item_id: str = Field("api_item_001", min_length=1)
     user_id: str = Field("api_buyer", min_length=1)
@@ -61,6 +63,18 @@ def _build_item_description(item_info: Dict[str, Any]) -> str:
     return f"当前商品的信息如下：标题:{title} 价格:{price}元 详情: {json.dumps(item_info, ensure_ascii=False)}"
 
 
+def _build_user_message(request: ReplyRequest) -> str:
+    messages = [request.user_msg.strip()]
+    messages.extend(message.strip() for message in request.additional_user_msgs if message.strip())
+    batch = MessageBatch(
+        chat_id=request.chat_id,
+        item_id=request.item_id,
+        user_id=request.user_id,
+        messages=messages,
+    )
+    return batch.combined_text()
+
+
 def _snapshot_to_response(snapshot) -> MemorySnapshotResponse:
     return MemorySnapshotResponse(
         chat_id=snapshot.chat_id,
@@ -101,10 +115,11 @@ def create_app(
         bot: XianyuReplyBot = app.state.bot
         item_info = request.item_info or _load_default_item_info()
         item_description = _build_item_description(item_info)
+        user_message = _build_user_message(request)
         context = request.context if request.context is not None else bot.db.get_context_by_chat(request.chat_id)
 
         bot_reply = bot.generate_reply(
-            request.user_msg,
+            user_message,
             item_description,
             context=context,
             chat_id=request.chat_id,
@@ -115,7 +130,7 @@ def create_app(
                 chat_id=request.chat_id,
                 user_id=request.user_id,
                 item_id=request.item_id,
-                user_text=request.user_msg,
+                user_text=user_message,
                 assistant_id=request.assistant_id,
                 assistant_text=None if bot_reply == "-" else bot_reply,
                 intent=bot.last_intent,

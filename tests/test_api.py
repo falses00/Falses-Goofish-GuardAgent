@@ -75,6 +75,29 @@ def test_reply_persists_price_guardrail_trace(tmp_path):
     assert traces["items"][0]["trace"]["chat_id"] == "api_chat_price"
 
 
+def test_reply_combines_additional_user_messages_before_agent_loop(tmp_path):
+    client = build_client(tmp_path)
+
+    response = client.post(
+        "/api/reply",
+        json={
+            "chat_id": "api_chat_batch",
+            "item_id": "item_ipad",
+            "user_msg": "你好",
+            "additional_user_msgs": ["128G 吗", "3000 元能出吗"],
+        },
+    )
+
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["intent"] == "price"
+    assert payload["trace"]["price_decision"]["buyer_offer"] == 3000
+    assert len(payload["memory"]["messages"]) == 2
+    assert "用户连续发送了以下消息" in payload["memory"]["messages"][0]["content"]
+    assert "128G 吗" in payload["memory"]["messages"][0]["content"]
+
+
 def test_empty_user_message_is_rejected(tmp_path):
     client = build_client(tmp_path)
 

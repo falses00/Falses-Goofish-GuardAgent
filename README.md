@@ -103,6 +103,25 @@ curl -X POST http://127.0.0.1:8000/api/reply ^
   -d "{\"chat_id\":\"demo_api\",\"item_id\":\"ipad\",\"user_msg\":\"3000 元能出吗\"}"
 ```
 
+### 8. 连续消息聚合
+
+真实买家经常连续发送多条短消息，例如：
+
+```text
+你好
+128G 吗
+3000 元能出吗
+```
+
+如果每条消息都立刻触发一次 LLM，Agent 容易答非所问、重复回复或先回答了“你好”再错过真正的报价。`core/message_aggregation.py` 会按 `chat_id + item_id + user_id` 建立聚合窗口，在短时间内把连续消息合并成一次 Agent 输入。
+
+可配置项：
+
+- `MESSAGE_AGGREGATION_ENABLED=true`
+- `MESSAGE_AGGREGATION_WINDOW_SECONDS=1.2`
+- `MESSAGE_AGGREGATION_MAX_MESSAGES=5`
+- `MESSAGE_AGGREGATION_MAX_CHARS=1200`
+
 ## 项目结构
 
 ```text
@@ -114,6 +133,7 @@ Falses-Goofish-GuardAgent/
 ├── core/
 │   ├── __init__.py
 │   ├── experts.py              # BargainExpert 与 FAQExpert
+│   ├── message_aggregation.py  # 连续买家消息 debounce 聚合
 │   ├── model_provider.py       # Agnes / OpenAI-compatible 模型配置
 │   ├── observability.py        # AgentTrace 可观测结构
 │   ├── evaluation.py           # 离线 LLM stub 与 Agent 评测 harness
@@ -132,6 +152,7 @@ Falses-Goofish-GuardAgent/
 ├── prompts/                    # 提示词模板，正式提示词默认不入库
 ├── tests/
 │   ├── test_agents.py          # 核心策略单元测试
+│   ├── test_message_aggregation.py # 消息聚合状态机测试
 │   └── test_api.py             # HTTP API 与失败路径测试
 ├── .env.example                # 配置模板
 ├── requirements.txt
@@ -232,7 +253,7 @@ python main.py --mode xianyu
 ## 自动化测试
 
 ```bash
-pytest tests/test_agents.py tests/test_api.py -q
+pytest tests/test_agents.py tests/test_message_aggregation.py tests/test_api.py -q
 python main.py --mode smoke
 python tools/run_agent_eval.py --min-score 1.0
 ```
@@ -248,6 +269,7 @@ python tools/run_agent_eval.py --min-score 1.0
 - 无效折扣配置自动回退。
 - 规格数字不误判成买家报价。
 - 原子写入一轮对话记忆，避免半轮上下文。
+- 连续买家消息 debounce 聚合，避免多条短消息触发多次错误回复。
 - FastAPI `/api/reply` 服务接口、memory snapshot、trace JSONL 回查。
 - 空消息等非法输入返回 422，避免脏请求进入 Agent 决策链路。
 - 离线 Agent 评测集，覆盖意图路由、RAG 命中、护栏触发、价格决策和最终记忆状态。
@@ -269,6 +291,8 @@ python tools/run_agent_eval.py --min-score 1.0
 
 可直接参考 [docs/RESUME_PROJECT_EXPERIENCE.md](docs/RESUME_PROJECT_EXPERIENCE.md) 和 [docs/BIG_TECH_AGENT_READINESS.md](docs/BIG_TECH_AGENT_READINESS.md)，里面包含项目描述、技术栈、简历 bullet、面试讲述版本、评测体系和大厂岗位能力映射。
 
+如果想把本项目当成 Agent 最佳实践教学项目来学习，可以从 [docs/AGENT_BEST_PRACTICES_TUTORIAL.md](docs/AGENT_BEST_PRACTICES_TUTORIAL.md) 开始。每一课都会对应真实业务问题、代码文件、测试命令和面试讲法。
+
 ## 配置项
 
 | 变量 | 说明 |
@@ -282,6 +306,10 @@ python tools/run_agent_eval.py --min-score 1.0
 | `MODEL_NAME` | 通用模型名称，兼容旧配置 |
 | `COOKIES_STR` | 闲鱼 / Goofish 网页端 Cookie，仅 xianyu 模式需要 |
 | `DEFAULT_DISCOUNT_LIMIT` | 最低折扣比例，例如 `0.85` 表示最多降到 8.5 折 |
+| `MESSAGE_AGGREGATION_ENABLED` | 是否启用连续买家消息聚合，默认 `true` |
+| `MESSAGE_AGGREGATION_WINDOW_SECONDS` | 聚合窗口秒数，默认 `1.2` |
+| `MESSAGE_AGGREGATION_MAX_MESSAGES` | 单批最多聚合消息数，达到后立即触发 |
+| `MESSAGE_AGGREGATION_MAX_CHARS` | 单批最多字符数，达到后立即触发 |
 | `API_OFFLINE_MODE` | API 服务是否使用离线 deterministic LLM，演示 / CI 可设为 `true` |
 | `API_CHAT_DB_PATH` | API 服务使用的 SQLite 会话数据库路径 |
 | `AGENT_TRACE_PATH` | API 服务写入的 JSONL trace 文件路径 |

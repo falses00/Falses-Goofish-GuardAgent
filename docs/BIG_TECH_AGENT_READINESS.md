@@ -30,8 +30,10 @@ The project already had routing, SQLite memory, trace logging, smoke mode, deter
 ## Added To Reach Interview-Grade Engineering Depth
 
 - `api/app.py`: FastAPI service wrapper around the same `XianyuReplyBot` core with typed request / response models.
+- `core/message_aggregation.py`: input-boundary debounce layer that turns bursty platform events into one stable user turn before routing.
 - `core/trace_store.py`: append-only JSONL trace store for replaying recent Agent decisions.
-- `tests/test_api.py`: API tests for health, tech routing, price guardrails, trace lookup, memory persistence, and invalid request rejection.
+- `tests/test_message_aggregation.py`: deterministic state-machine tests for message batching, isolation, and force-flush behavior.
+- `tests/test_api.py`: API tests for health, tech routing, price guardrails, trace lookup, memory persistence, batched user input, and invalid request rejection.
 - `evals/agent_eval_cases.json`: curated golden scenarios covering product facts, lowball negotiation, serious offers, commitment consistency, and fallback chat.
 - `core/evaluation.py`: deterministic offline evaluation harness with trace-aware assertions.
 - `tools/run_agent_eval.py`: CLI runner that emits JSON and Markdown eval reports.
