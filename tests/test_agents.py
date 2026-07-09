@@ -136,6 +136,15 @@ def test_price_router_detects_bare_number_offer():
     assert intent == "price"
 
 
+def test_price_router_detects_number_offer_with_action_later():
+    """裸数字后面隔着中文动作词时，也应识别为议价。"""
+    router = IntentRouter(classify_agent=None)
+
+    intent = router.detect("4300 给你，直接拍", item_desc="", context="")
+
+    assert intent == "price"
+
+
 def test_price_commitment_memory_is_monotonic(tmp_path):
     """价格记忆应保守更新：我方最低承诺取更低值，买家最高出价取更高值。"""
     db_path = tmp_path / "chat_history.db"

@@ -148,7 +148,7 @@ class IntentRouter:
             },
             'price': { # 砍价意图判定
                 'keywords': ['便宜', '价', '砍价', '少点', '大刀', '抹零', '邮费', '少个邮费'],
-                'patterns': [r'\d+元', r'能少\d+', r'\d+(可以|行|出|卖|拍)', r'包邮']
+                'patterns': [r'\d+元', r'能少\d+', r'\d+(可以|行|出|卖|拍)', r'\d+.*(拍|成交|给你|要了)', r'包邮']
             }
         }
         self.classify_agent = classify_agent

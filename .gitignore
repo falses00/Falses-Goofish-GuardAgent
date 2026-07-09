@@ -47,8 +47,9 @@ logs/
 *.swo
 .coverage
 htmlcov/
+output/
 .pytest_cache/
 .tox/
 .nox/
 .hypothesis/
-.coverage.* 
+.coverage.*

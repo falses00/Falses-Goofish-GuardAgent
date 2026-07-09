@@ -186,6 +186,8 @@ python main.py --mode xianyu
 
 ```bash
 pytest tests/test_agents.py -q
+python main.py --mode smoke
+python tools/run_agent_eval.py --min-score 1.0
 ```
 
 当前测试覆盖：
@@ -199,11 +201,23 @@ pytest tests/test_agents.py -q
 - 无效折扣配置自动回退。
 - 规格数字不误判成买家报价。
 - 原子写入一轮对话记忆，避免半轮上下文。
+- 离线 Agent 评测集，覆盖意图路由、RAG 命中、护栏触发、价格决策和最终记忆状态。
 - 商品知识库关键词命中。
+
+## Agent 评测体系
+
+本项目新增了大厂 Agent 工程岗位更看重的离线评测 harness：
+
+- `evals/agent_eval_cases.json`：真实业务对话黄金集。
+- `core/evaluation.py`：确定性 LLM stub + trace-aware 断言。
+- `tools/run_agent_eval.py`：输出 JSON / Markdown 评测报告。
+- `.github/workflows/ci.yml`：CI 自动跑单测、编译、runtime smoke 和 agent eval gate。
+
+评测会检查 `intent`、`routed_agent`、`guardrails`、`knowledge.matched`、`price_decision.action`、`buyer_offer`、`calculated_price`、`bargain_count`、`lowest_price_committed` 和 `buyer_highest_offer`，避免项目退化成只看最终回复的 demo。
 
 ## 简历项目经历
 
-可直接参考 [docs/RESUME_PROJECT_EXPERIENCE.md](docs/RESUME_PROJECT_EXPERIENCE.md)，里面包含项目描述、技术栈、简历 bullet、面试讲述版本和可量化表达。
+可直接参考 [docs/RESUME_PROJECT_EXPERIENCE.md](docs/RESUME_PROJECT_EXPERIENCE.md) 和 [docs/BIG_TECH_AGENT_READINESS.md](docs/BIG_TECH_AGENT_READINESS.md)，里面包含项目描述、技术栈、简历 bullet、面试讲述版本、评测体系和大厂岗位能力映射。
 
 ## 配置项
 

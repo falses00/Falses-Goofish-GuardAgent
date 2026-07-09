@@ -1,0 +1,109 @@
+[
+  {
+    "id": "product_truthfulness_rag",
+    "turns": [
+      {
+        "user": "这个屏幕有划痕吗，电池健康多少？",
+        "expect": {
+          "intent": "tech",
+          "routed_agent": "TechAgent",
+          "guardrails_contains": ["truthful_product_facts"],
+          "knowledge_matched": true
+        }
+      }
+    ],
+    "final_expect": {
+      "bargain_count": 0
+    }
+  },
+  {
+    "id": "lowball_then_serious_offer",
+    "turns": [
+      {
+        "user": "128G 的话，3000 元能出吗？",
+        "expect": {
+          "intent": "price",
+          "routed_agent": "PriceAgent",
+          "price_action": "REFUSE_AND_COUNTER",
+          "buyer_offer": 3000.0,
+          "calculated_price": 4149,
+          "never_below_min_price": true,
+          "guardrails_contains": ["pricing_floor", "no_price_raise_after_commitment"]
+        }
+      },
+      {
+        "user": "4100 可以的话我马上拍",
+        "expect": {
+          "intent": "price",
+          "routed_agent": "PriceAgent",
+          "price_action": "NEGOTIATE",
+          "buyer_offer": 4100.0,
+          "calculated_price": 4129,
+          "never_below_min_price": true
+        }
+      }
+    ],
+    "final_expect": {
+      "bargain_count": 2,
+      "lowest_price_committed": 4129.0,
+      "buyer_highest_offer": 4100.0
+    }
+  },
+  {
+    "id": "commitment_never_raises_back",
+    "turns": [
+      {
+        "user": "能少点吗？",
+        "expect": {
+          "intent": "price",
+          "routed_agent": "PriceAgent",
+          "price_action": "NEGOTIATE",
+          "calculated_price": 4224,
+          "never_below_min_price": true
+        }
+      },
+      {
+        "user": "4200 可以的话我拍",
+        "expect": {
+          "intent": "price",
+          "routed_agent": "PriceAgent",
+          "price_action": "NEGOTIATE",
+          "buyer_offer": 4200.0,
+          "calculated_price": 4214,
+          "never_below_min_price": true
+        }
+      },
+      {
+        "user": "4300 给你，直接拍",
+        "expect": {
+          "intent": "price",
+          "routed_agent": "PriceAgent",
+          "price_action": "ACCEPT",
+          "buyer_offer": 4300.0,
+          "calculated_price": 4214,
+          "never_below_min_price": true
+        }
+      }
+    ],
+    "final_expect": {
+      "bargain_count": 3,
+      "lowest_price_committed": 4214.0,
+      "buyer_highest_offer": 4300.0
+    }
+  },
+  {
+    "id": "fallback_default_chat",
+    "turns": [
+      {
+        "user": "你好，还在吗？",
+        "expect": {
+          "intent": "default",
+          "routed_agent": "DefaultAgent"
+        }
+      }
+    ],
+    "final_expect": {
+      "bargain_count": 0
+    }
+  }
+]

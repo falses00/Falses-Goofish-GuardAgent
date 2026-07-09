@@ -39,6 +39,7 @@ Python、OpenAI SDK、WebSocket、SQLite、pytest、Rich CLI、Prompt Engineerin
 - 构建本地 Mock CLI 调试模式，无需真实闲鱼 Cookie 即可模拟买家咨询和砍价，提升项目演示、策略调参和回归验证效率。
 - 使用 pytest 覆盖议价边界、历史承诺不抬价、商品级底价优先、无效折扣回退、规格数字误判报价、RAG 命中/未命中和 SQLite 单调记忆等核心路径。
 - 新增 `python main.py --mode smoke` 离线端到端自检，使用内置 LLM stub 真实穿过入口、路由、Agent、SQLite 记忆、Trace 和回复生成链路，降低回归验证对真实 Cookie/API Key 的依赖。
+- 构建离线 Agent 评测 harness，将真实交易对话抽象为黄金评测集，基于 trace-level 断言评估意图路由、RAG 命中、护栏触发、价格决策和最终记忆状态，并接入 GitHub Actions 作为 CI 质量门禁。
 
 ## 面试讲述版本
 
