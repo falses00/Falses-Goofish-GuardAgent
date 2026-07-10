@@ -13,7 +13,7 @@
 
 ## 项目一句话
 
-基于闲鱼 / Goofish WebSocket 消息链路二次开发的本地优先 AI 客服 Agent，通过规则路由、价格护栏、商品知识库、SQLite 状态记忆、FastAPI 服务接口和 trace/eval 体系，将 LLM 回复从“生成式聊天”升级为可控、可解释、可测试、可集成的交易辅助系统。
+基于闲鱼 / Goofish WebSocket 消息链路二次开发的本地优先 AI 客服 Agent，通过规则路由、价格护栏、商品知识库、真人化回复风格层、回复执行 Outbox、SQLite 状态记忆、FastAPI 服务接口和 trace/eval 体系，将 LLM 回复从“生成式聊天”升级为可控、可解释、可测试、可集成的交易辅助系统。
 
 ## 推荐简历写法
 
@@ -23,7 +23,7 @@ Falses Goofish GuardAgent：闲鱼二手交易 AI 客服与议价安全 Agent
 
 ### 项目描述
 
-基于 Python、Agnes AI / OpenAI-compatible LLM、FastAPI、WebSocket、SQLite 与 Rich CLI 构建闲鱼 / Goofish AI 客服 Agent，在原有自动回复项目基础上重构决策链路，引入多 Agent 路由、确定性议价护栏、商品事实 RAG、会话状态记忆、可观测 Trace 和离线评测体系，支持本地 Mock 调试、HTTP 服务化集成与真实闲鱼长连接挂机。
+基于 Python、Agnes AI / OpenAI-compatible LLM、FastAPI、WebSocket、SQLite 与 Rich CLI 构建闲鱼 / Goofish AI 客服 Agent，在原有自动回复项目基础上重构决策链路，引入多 Agent 路由、确定性议价护栏、商品事实 RAG、真人化表达约束、回复执行 Outbox、会话状态记忆、可观测 Trace 和离线评测体系，支持本地 Mock 调试、HTTP 服务化集成与真实闲鱼长连接挂机。
 
 ### 技术栈
 
@@ -35,6 +35,8 @@ Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、pytest、Rich CL
 - 抽象 `model_provider` 配置层，默认接入 Agnes AI 的 OpenAI-compatible Chat Completions API，同时保留 `API_KEY / MODEL_BASE_URL / MODEL_NAME` 兼容路径，降低后续模型切换成本。
 - 设计连续消息聚合模块，在 Agent loop 前按 `chat_id + item_id + user_id` 对买家短时间多条消息进行 debounce 合并，将平台事件流稳定为业务 turn，减少重复回复、半截上下文污染和无效 LLM 调用。
 - 设计商品规则中心，将允许承诺、禁止承诺、售后边界和发货条件从 Prompt 中抽离为结构化 JSON 规则；回复前注入规则上下文，回复后做禁止承诺校验，避免模型编造成功率、内部渠道、平台外交易等高风险话术。
+- 设计真人化回复风格层，将“像真实闲鱼个人卖家”从 prompt 口号落成可配置护栏；生成前注入口语化约束，生成后确定性清洗“作为 AI 客服”“感谢咨询”等机器腔表达，并将改写结果写入 Trace。
+- 设计回复执行 Outbox，在真实 WebSocket 发送前持久化待发送回复并抢占发送权，支持 `pending / sending / sent / failed / skipped` 状态流转，避免重连或重复同步导致重复回复，并为失败重试提供执行记录。
 - 实现交付决策引擎，根据商品类型、订单状态和是否需要人工确认输出 `wait_for_payment / manual_review / auto_deliver` 等可审计动作，为后续自动发货执行层提供安全前置判断。
 - 设计 `BargainExpert` 确定性议价策略，将价格底线、历史承诺价、买家最高出价从 LLM Prompt 中剥离为代码级约束，避免模型被诱导突破底价或前后报价不一致。
 - 基于 SQLite 实现会话级状态记忆，持久化聊天历史、议价次数、我方最低承诺价和买家最高出价；通过事务化 `append_turn` 原子写入用户消息、助手回复和议价次数，避免半轮上下文污染，并采用单调更新策略保证价格承诺只降不升、买家报价只取最高。
@@ -54,9 +56,10 @@ Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、pytest、Rich CL
 我把系统拆成四层：
 
 1. **路由层**：先通过关键词和正则判断咨询、议价、闲聊，规则兜不住再交给分类 Agent。
-2. **策略层**：议价由 `BargainExpert` 计算安全价格，商品咨询由 `FAQExpert` 从本地 JSON 知识库抽取事实。
-3. **表达层**：把策略结果注入 Prompt，让 LLM 生成自然话术，但不能改写底价和商品事实。
-4. **服务与评测层**：FastAPI 暴露 typed contract，JSONL trace 支持回放，golden eval 和 pytest 在 CI 中阻断回归。
+2. **策略层**：议价由 `BargainExpert` 计算安全价格，商品咨询由 `FAQExpert` 从本地 JSON 知识库抽取事实，商品规则中心控制承诺边界。
+3. **表达层**：把策略结果注入 Prompt，让 LLM 生成自然话术，再由 `HumanReplyStyler` 清洗机器腔和客服腔。
+4. **执行层**：真实发送前进入 Reply Outbox，按源消息去重、抢占发送权、记录发送成功或失败。
+5. **服务与评测层**：FastAPI 暴露 typed contract，JSONL trace 支持回放，golden eval 和 pytest 在 CI 中阻断回归。
 
 为了让系统可调试，我加了 `AgentTrace`，每次回复都会记录意图、路由、价格决策、知识命中和护栏。这样出了问题不是猜 Prompt，而是能直接看到决策链路。
 
@@ -65,7 +68,7 @@ Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、pytest、Rich CL
 如果需要放在简历里更偏结果，可以写：
 
 - 将原项目从单一自动回复改造为 4 类 Agent 协同链路，补齐价格护栏、商品事实约束、会话记忆、服务接口、trace 回放和本地调试能力。
-- 为核心决策路径补充 25+ 个单元 / API 测试，覆盖正常路径、边界值、错误配置、对抗输入、消息聚合状态机、规则护栏、交付决策和 HTTP 失败路径。
+- 为核心决策路径补充 30+ 个单元 / API 测试，覆盖正常路径、边界值、错误配置、对抗输入、消息聚合状态机、真人化回复、回复 Outbox 去重/重试、规则护栏、交付决策和 HTTP 失败路径。
 - 将真实闲鱼挂机链路与本地 Mock 演示链路统一到同一套 Agent 决策核心，降低调试和演示对平台 Cookie 的依赖。
 - 基于黄金交易场景构建离线 Agent eval gate，检查 intent、routed agent、guardrails、RAG grounding、price decision 和 memory consistency，避免只用最终自然语言回复判断质量。
 

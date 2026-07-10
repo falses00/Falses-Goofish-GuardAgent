@@ -17,9 +17,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
       - name: Unit tests
-        run: pytest tests/test_agents.py tests/test_message_aggregation.py tests/test_product_rules.py tests/test_api.py -q
+        run: pytest tests/test_agents.py tests/test_message_aggregation.py tests/test_product_rules.py tests/test_human_style.py tests/test_reply_outbox.py tests/test_api.py -q
       - name: Compile check
-        run: python -m py_compile main.py XianyuAgent.py context_manager.py core/experts.py core/message_aggregation.py core/model_provider.py core/observability.py core/product_rules.py core/evaluation.py core/trace_store.py api/app.py tests/test_agents.py tests/test_message_aggregation.py tests/test_product_rules.py tests/test_api.py
+        run: python -m py_compile main.py XianyuAgent.py context_manager.py core/experts.py core/human_style.py core/message_aggregation.py core/model_provider.py core/observability.py core/product_rules.py core/reply_outbox.py core/evaluation.py core/trace_store.py api/app.py tests/test_agents.py tests/test_message_aggregation.py tests/test_product_rules.py tests/test_human_style.py tests/test_reply_outbox.py tests/test_api.py
       - name: Runtime smoke
         run: python main.py --mode smoke
       - name: Agent eval gate

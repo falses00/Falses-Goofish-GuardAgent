@@ -8,7 +8,7 @@
 - 商品详情咨询时，LLM 不能编造配件、成色、拆修、发货信息。
 - 本地演示和迭代时，不必每次都依赖真实 Cookie 和真实买家消息。
 
-当前版本保留原项目的闲鱼 WebSocket 长连接能力，并新增本地 Mock CLI、HTTP Agent API、SQLite 价格承诺记忆、硬规则议价护栏、JSON 商品知识库、商品规则中心、交付决策引擎、JSONL trace 回放和针对核心策略的自动化测试 / Agent 评测门禁。
+当前版本保留原项目的闲鱼 WebSocket 长连接能力，并新增本地 Mock CLI、HTTP Agent API、SQLite 价格承诺记忆、硬规则议价护栏、JSON 商品知识库、商品规则中心、真人化回复风格层、回复执行 Outbox、交付决策引擎、JSONL trace 回放和针对核心策略的自动化测试 / Agent 评测门禁。
 
 仓库地址：[https://github.com/falses00/Falses-Goofish-GuardAgent](https://github.com/falses00/Falses-Goofish-GuardAgent)
 
@@ -21,6 +21,8 @@
 - **LLM 负责表达**：把回复写得自然、像真人卖家。
 - **规则负责底线**：价格、承诺、商品事实由确定性代码控制。
 - **SQLite 负责记忆**：多轮会话中记录历史报价和买家最高出价。
+- **Style 负责人味**：拦截“作为 AI 客服”“感谢咨询”等机器腔，让回复更像真实个人卖家。
+- **Outbox 负责执行**：真实发送前先登记、抢占发送权、标记成功/失败，避免重复回复。
 - **Trace 负责解释**：每轮回复记录路由、护栏、定价来源和知识命中。
 - **本地模式负责调试**：不接入闲鱼也能复现议价和咨询链路。
 - **服务接口负责集成**：通过 FastAPI 暴露 `/api/reply`，让 Agent 能接入 Web 管理台、移动端映射或后续 MCP 工具。
@@ -132,6 +134,24 @@ curl -X POST http://127.0.0.1:8000/api/reply ^
 - **记住规矩**：每个商品有独立的退款、发货、允许/禁止承诺配置。
 - **发货前置判断**：`delivery_decision()` 会先判断订单是否满足付款条件、是否需要人工确认，再决定能否自动交付。
 
+### 10. 真人化回复风格层
+
+`data/human_reply_style.json` 定义闲鱼个人卖家的回复风格：短句、口语、先回答问题、不要客服腔和机器腔。`core/human_style.py` 会在两处生效：
+
+- 生成前：把“像真实个人卖家”的表达约束注入 system prompt。
+- 生成后：确定性清洗“您好”“感谢咨询”“作为 AI 客服”“请问还有什么可以帮您”等不自然表达。
+
+这层不是简单调高温度，而是可测试、可观测的风格护栏。每轮 `AgentTrace.style` 都会记录是否改写、触发了哪些风格问题、最终是否安全。
+
+### 11. 回复执行 Outbox
+
+真实闲鱼 WebSocket 同步可能因为重连、ACK、重复推送导致同一条买家消息被处理多次。`core/reply_outbox.py` 在真实发送前落库并抢占发送权：
+
+- 同一个源消息事件只允许发送一次。
+- 发送成功后标记 `sent`，重复事件直接跳过。
+- 发送失败后标记 `failed`，允许后续重试。
+- `REPLY_SEND_DRY_RUN=true` 时只记录不真实发送，适合接入真实 Cookie 前压测。
+
 ## 项目结构
 
 ```text
@@ -143,10 +163,12 @@ Falses-Goofish-GuardAgent/
 ├── core/
 │   ├── __init__.py
 │   ├── experts.py              # BargainExpert 与 FAQExpert
+│   ├── human_style.py          # 真人卖家回复风格约束与机器腔清洗
 │   ├── message_aggregation.py  # 连续买家消息 debounce 聚合
 │   ├── model_provider.py       # Agnes / OpenAI-compatible 模型配置
 │   ├── observability.py        # AgentTrace 可观测结构
 │   ├── product_rules.py        # 商品规则中心与交付决策
+│   ├── reply_outbox.py         # 自动回复执行 Outbox 与重复发送防护
 │   ├── evaluation.py           # 离线 LLM stub 与 Agent 评测 harness
 │   └── trace_store.py          # JSONL trace 持久化与回放
 ├── api/
@@ -154,7 +176,8 @@ Falses-Goofish-GuardAgent/
 │   └── app.py                  # FastAPI Agent backend
 ├── data/
 │   ├── product_info.json       # 示例商品知识库
-│   └── product_rules.json      # 商品承诺、售后和发货规则
+│   ├── product_rules.json      # 商品承诺、售后和发货规则
+│   └── human_reply_style.json  # 真人化回复风格配置
 ├── evals/
 │   └── agent_eval_cases.json   # 交易场景黄金评测集
 ├── docs/
@@ -166,6 +189,8 @@ Falses-Goofish-GuardAgent/
 │   ├── test_agents.py          # 核心策略单元测试
 │   ├── test_message_aggregation.py # 消息聚合状态机测试
 │   ├── test_product_rules.py   # 规则中心与交付决策测试
+│   ├── test_human_style.py     # 真人化回复风格测试
+│   ├── test_reply_outbox.py    # 回复执行 Outbox 去重与重试测试
 │   └── test_api.py             # HTTP API 与失败路径测试
 ├── .env.example                # 配置模板
 ├── requirements.txt
@@ -266,7 +291,7 @@ python main.py --mode xianyu
 ## 自动化测试
 
 ```bash
-pytest tests/test_agents.py tests/test_message_aggregation.py tests/test_product_rules.py tests/test_api.py -q
+pytest tests/test_agents.py tests/test_message_aggregation.py tests/test_product_rules.py tests/test_human_style.py tests/test_reply_outbox.py tests/test_api.py -q
 python main.py --mode smoke
 python tools/run_agent_eval.py --min-score 1.0
 ```
@@ -284,6 +309,8 @@ python tools/run_agent_eval.py --min-score 1.0
 - 原子写入一轮对话记忆，避免半轮上下文。
 - 连续买家消息 debounce 聚合，避免多条短消息触发多次错误回复。
 - 商品规则中心，拦截违规承诺并按订单状态判断是否可自动交付。
+- 真人化回复风格层，拦截和改写机器腔、客服腔、长段落和列表式回复。
+- 回复执行 Outbox，防止同一条买家事件因重连或重复同步被重复发送。
 - FastAPI `/api/reply` 服务接口、memory snapshot、trace JSONL 回查。
 - 空消息等非法输入返回 422，避免脏请求进入 Agent 决策链路。
 - 离线 Agent 评测集，覆盖意图路由、RAG 命中、护栏触发、价格决策和最终记忆状态。
@@ -321,6 +348,9 @@ python tools/run_agent_eval.py --min-score 1.0
 | `COOKIES_STR` | 闲鱼 / Goofish 网页端 Cookie，仅 xianyu 模式需要 |
 | `DEFAULT_DISCOUNT_LIMIT` | 最低折扣比例，例如 `0.85` 表示最多降到 8.5 折 |
 | `PRODUCT_RULES_PATH` | 商品规则中心路径，默认 `data/product_rules.json` |
+| `HUMAN_REPLY_STYLE_PATH` | 真人卖家回复风格配置路径，默认 `data/human_reply_style.json` |
+| `REPLY_OUTBOX_DB_PATH` | 自动回复执行 Outbox SQLite 路径，默认 `data/reply_outbox.db` |
+| `REPLY_SEND_DRY_RUN` | 是否只记录 Outbox 而不真实发送，接真实 Cookie 前可设为 `true` |
 | `MESSAGE_AGGREGATION_ENABLED` | 是否启用连续买家消息聚合，默认 `true` |
 | `MESSAGE_AGGREGATION_WINDOW_SECONDS` | 聚合窗口秒数，默认 `1.2` |
 | `MESSAGE_AGGREGATION_MAX_MESSAGES` | 单批最多聚合消息数，达到后立即触发 |

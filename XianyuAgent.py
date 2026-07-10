@@ -6,6 +6,7 @@ from loguru import logger
 
 # 引入二开新增专家模块与上下文数据库
 from core.experts import BargainExpert, FAQExpert
+from core.human_style import HumanReplyStyler
 from core.model_provider import create_model_client, get_model_name
 from core.observability import AgentTrace
 from core.product_rules import ProductRuleStore
@@ -23,6 +24,7 @@ class XianyuReplyBot:
         # 初始化持久化数据库管理器，用于跟踪报价承诺
         self.db = ChatContextManager(db_path=db_path or os.getenv("CHAT_DB_PATH", "data/chat_history.db"))
         self.rule_store = ProductRuleStore()
+        self.human_styler = HumanReplyStyler()
 
         self._init_system_prompts()
         self._init_agents()
@@ -90,7 +92,8 @@ class XianyuReplyBot:
         self.last_trace = AgentTrace(chat_id=chat_id, user_msg=user_msg)
         product_rule = self.rule_store.resolve(item_id=item_id, item_desc=item_desc)
         rule_context = self.rule_store.build_prompt_context(product_rule)
-        enriched_item_desc = f"{item_desc}\n{rule_context}"
+        style_context = self.human_styler.build_prompt_context()
+        enriched_item_desc = f"{item_desc}\n{rule_context}\n{style_context}"
         self.last_trace.rules = {
             "rule_id": product_rule.rule_id,
             "delivery_type": product_rule.delivery.type,
@@ -138,14 +141,19 @@ class XianyuReplyBot:
             logger.warning(f"回复触发商品规则护栏: rule_id={product_rule.rule_id}, violations={validation.violations}")
             reply = self.rule_store.build_safe_reply(product_rule, validation)
 
+        reply, style_result = self.human_styler.apply(reply)
+
         self.last_trace.intent = self.last_intent
         self.last_trace.routed_agent = agent.__class__.__name__
         self.last_trace.bargain_count = bargain_count
         agent_trace = getattr(agent, "last_trace", {})
-        self.last_trace.guardrails = list(dict.fromkeys(agent_trace.get("guardrails", []) + validation.guardrails))
+        self.last_trace.guardrails = list(dict.fromkeys(
+            agent_trace.get("guardrails", []) + validation.guardrails + style_result.guardrails
+        ))
         self.last_trace.price_decision = agent_trace.get("price_decision", {})
         self.last_trace.knowledge = agent_trace.get("knowledge", {})
         self.last_trace.rules.update(validation.to_dict())
+        self.last_trace.style = style_result.to_dict()
         logger.info(f"[AgentTrace] {json.dumps(self.last_trace.to_dict(), ensure_ascii=False)}")
         return reply
 

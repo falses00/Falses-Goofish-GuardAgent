@@ -17,6 +17,7 @@ from XianyuAgent import XianyuReplyBot
 from context_manager import ChatContextManager
 from core.message_aggregation import MessageAggregator
 from core.model_provider import has_model_api_key
+from core.reply_outbox import ReplyOutbox
 
 
 class XianyuLive:
@@ -60,6 +61,8 @@ class XianyuLive:
             max_chars=int(os.getenv("MESSAGE_AGGREGATION_MAX_CHARS", "1200")),
         )
         self.message_flush_tasks = {}
+        self.reply_outbox = ReplyOutbox()
+        self.reply_send_dry_run = os.getenv("REPLY_SEND_DRY_RUN", "false").lower() in {"1", "true", "yes", "on"}
 
         # 人工接管关键词，从环境变量读取
         self.toggle_keywords = os.getenv("TOGGLE_KEYWORDS", "。")
@@ -372,7 +375,20 @@ class XianyuLive:
         send_message,
         send_user_name="买家",
         aggregation_count=1,
+        source_message_id=None,
     ):
+        source_message_id = source_message_id or ReplyOutbox.build_source_message_id(
+            chat_id, item_id, send_user_id, send_message
+        )
+        dedupe_key = ReplyOutbox.build_dedupe_key(chat_id, item_id, send_user_id, source_message_id)
+        existing_record = self.reply_outbox.get(dedupe_key)
+        if existing_record and existing_record.status in {"pending", "sending", "sent", "skipped"}:
+            logger.info(
+                f"检测到重复买家消息事件，跳过重复 Agent 决策: chat_id={chat_id}, "
+                f"item_id={item_id}, outbox_status={existing_record.status}"
+            )
+            return
+
         # 从数据库中获取商品信息，如果不存在则从API获取并保存
         item_info = self.context_manager.get_item_info(item_id)
         if not item_info:
@@ -413,6 +429,15 @@ class XianyuLive:
                 assistant_text=None,
                 intent=bot.last_intent
             )
+            no_reply_record = self.reply_outbox.enqueue(
+                chat_id=chat_id,
+                item_id=item_id,
+                user_id=send_user_id,
+                source_message_id=source_message_id,
+                reply_text="-",
+                trace=bot.last_trace.to_dict(),
+            )
+            self.reply_outbox.mark_skipped(no_reply_record.dedupe_key, "no_reply")
             return
 
         self.context_manager.append_turn(
@@ -429,6 +454,22 @@ class XianyuLive:
             logger.info(f"用户 {send_user_name} 对商品 {item_id} 的议价次数: {bargain_count}")
 
         logger.info(f"机器人回复: {bot_reply}")
+        trace = bot.last_trace.to_dict()
+        outbox_record = self.reply_outbox.enqueue(
+            chat_id=chat_id,
+            item_id=item_id,
+            user_id=send_user_id,
+            source_message_id=source_message_id,
+            reply_text=bot_reply,
+            trace=trace,
+        )
+        claim = self.reply_outbox.claim_for_send(outbox_record.dedupe_key)
+        if not claim.claimed:
+            logger.info(
+                f"回复发送跳过: chat_id={chat_id}, item_id={item_id}, "
+                f"reason={claim.reason}, outbox_status={claim.record.status}"
+            )
+            return
 
         # 模拟人工输入延迟
         if self.simulate_human_typing:
@@ -438,7 +479,25 @@ class XianyuLive:
             logger.info(f"模拟人工输入，延迟发送 {total_delay:.2f} 秒...")
             await asyncio.sleep(total_delay)
 
-        await self.send_msg(websocket, chat_id, send_user_id, bot_reply)
+        if self.reply_send_dry_run:
+            self.reply_outbox.mark_skipped(outbox_record.dedupe_key, "dry_run")
+            logger.info(f"REPLY_SEND_DRY_RUN=true，仅记录不真实发送: chat_id={chat_id}, item_id={item_id}")
+            return
+
+        try:
+            await self.send_msg(websocket, chat_id, send_user_id, bot_reply)
+            sent_record = self.reply_outbox.mark_sent(outbox_record.dedupe_key)
+            logger.info(
+                f"回复发送成功: chat_id={chat_id}, item_id={item_id}, "
+                f"outbox_id={sent_record.id}, attempts={sent_record.attempt_count}"
+            )
+        except Exception as exc:
+            failed_record = self.reply_outbox.mark_failed(outbox_record.dedupe_key, str(exc))
+            logger.error(
+                f"回复发送失败: chat_id={chat_id}, item_id={item_id}, "
+                f"outbox_id={failed_record.id}, error={exc}"
+            )
+            raise
 
     async def _flush_aggregated_buyer_message_after_delay(self, key, websocket, send_user_name, delay_seconds):
         try:
@@ -455,6 +514,13 @@ class XianyuLive:
                 batch.combined_text(),
                 send_user_name=send_user_name,
                 aggregation_count=batch.count,
+                source_message_id=ReplyOutbox.build_source_message_id(
+                    batch.chat_id,
+                    batch.item_id,
+                    batch.user_id,
+                    batch.combined_text(),
+                    event_time_ms=batch.last_seen_ms,
+                ),
             )
         except asyncio.CancelledError:
             raise
@@ -481,6 +547,13 @@ class XianyuLive:
                 item_id,
                 send_message,
                 send_user_name=send_user_name,
+                source_message_id=ReplyOutbox.build_source_message_id(
+                    chat_id,
+                    item_id,
+                    send_user_id,
+                    send_message,
+                    event_time_ms=create_time,
+                ),
             )
             return
 

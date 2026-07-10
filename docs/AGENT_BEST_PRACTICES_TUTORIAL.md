@@ -10,7 +10,9 @@
 4. 事实边界：商品知识库 RAG-lite，防止编造商品事实。
 5. 可观测边界：AgentTrace、JSONL trace store、API trace 回查。
 6. 质量边界：pytest、smoke、golden eval、CI gate。
-7. 产品边界：FastAPI service contract、人审、自动发货前确认。
+7. 表达边界：真人化回复风格层，避免机器腔和客服腔。
+8. 执行边界：回复 Outbox，防重复发送、可重试、可审计。
+9. 产品边界：FastAPI service contract、人审、自动发货前确认。
 
 ## Lesson 1: 输入边界不是小事
 
@@ -166,3 +168,63 @@ python tools/run_agent_eval.py --min-score 1.0
 ### 面试讲法
 
 我没有把商品规则写死在 prompt，而是设计了商品规则中心。每个商品都有独立的允许承诺、禁止承诺、退款边界和发货策略。Agent 生成回复前会注入这些规则，生成后还会二次校验；如果出现违规承诺，会被安全回复替换。发货也不是由 LLM 直接执行，而是先由 `delivery_decision()` 根据订单状态和商品规则产出可审计决策，再由后续执行层处理。这让系统从“会聊天”升级为“可控交易 Agent”。
+
+## Lesson 3: 真人感和自动执行都要工程化
+
+自动操控闲鱼回复有两个很现实的问题：
+
+- 回复像客服机器人，会降低买家信任，甚至暴露自动化痕迹。
+- 平台 WebSocket 可能重复推送同一条消息，裸发会导致重复回复。
+
+这两个问题都不能只靠“把 prompt 写好”。更稳的做法是把它们做成两层工程边界。
+
+```mermaid
+flowchart LR
+    A["Buyer Message"] --> B["Message Aggregator"]
+    B --> C["Intent + Specialist Agent"]
+    C --> D["Product Rule Guardrail"]
+    D --> E["Human Style Guardrail"]
+    E --> F["Reply Outbox"]
+    F --> G["Xianyu WebSocket Send"]
+```
+
+### 表达边界：HumanReplyStyler
+
+`core/human_style.py` 做两件事：
+
+- 生成前注入“真实个人卖家”的风格要求：短句、口语、先回答问题、不要营销文案。
+- 生成后确定性清洗机器腔：例如“作为 AI 客服”“感谢咨询”“请问还有什么可以帮您”。
+
+对应配置在 `data/human_reply_style.json`，可以按你的商品风格继续调。
+
+### 执行边界：ReplyOutbox
+
+`core/reply_outbox.py` 把“准备发送的回复”持久化到 SQLite：
+
+- `pending`：已生成，等待发送。
+- `sending`：已抢占发送权。
+- `sent`：真实发送成功。
+- `failed`：发送失败，允许后续重试。
+- `skipped`：无需回复或 dry-run。
+
+live 模式里，同一个买家源消息会先计算 `source_message_id` 和 `dedupe_key`。如果同一事件已处理过，系统会在进入 Agent 之前跳过，避免重复调用模型、重复写记忆、重复回复买家。
+
+### 如何验证本课
+
+```bash
+pytest tests/test_human_style.py -q
+pytest tests/test_reply_outbox.py -q
+python main.py --mode smoke
+```
+
+你应该看到：
+
+- 机器腔回复会被改写，trace 中出现 `human_reply_style` 和 `human_style_rewrite`。
+- 同一个源消息只能 claim 一次发送权。
+- 发送失败后可以再次 claim，形成可重试执行语义。
+
+### 面试讲法
+
+我没有只靠 prompt 让 Agent “像真人”，而是把表达风格做成可配置、可测试、可观测的后处理护栏。生成前提示模型用个人卖家口吻，生成后再检测和清洗机器腔表达，并把结果写入 trace。
+
+同时，真实平台自动回复不能直接调用 send。我设计了 Reply Outbox：每条待发送回复先落库，再抢占发送权，发送成功/失败都有状态记录。这样 WebSocket 重连或重复同步不会造成重复回复，失败也可以重试。这是从 demo 走向生产级 Agent 的关键执行边界。
