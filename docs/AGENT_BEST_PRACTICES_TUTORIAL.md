@@ -207,24 +207,36 @@ flowchart LR
 - `failed`：发送失败，允许后续重试。
 - `skipped`：无需回复或 dry-run。
 
-live 模式里，同一个买家源消息会先计算 `source_message_id` 和 `dedupe_key`。如果同一事件已处理过，系统会在进入 Agent 之前跳过，避免重复调用模型、重复写记忆、重复回复买家。
+live 模式里，同一个买家源消息会先计算 `source_message_id` 和 `dedupe_key`。第一次处理才会调用 Agent 并写入完整 turn；如果 Outbox 已经存在，则根据状态恢复执行：`sent / skipped` 直接结束，`pending / failed` 复用已落库回复，`sending` 只有租约超时后才允许重新领取。
+
+这里有三个重要设计原则：
+
+- **决策与副作用分离**：LLM 生成回复是决策，WebSocket 发送是副作用。发送失败只重试副作用，不重新生成回复。
+- **原子领取**：`BEGIN IMMEDIATE` 把读取状态和 claim 放入同一个 SQLite 写事务，并发 worker 只能有一个把状态改为 `sending`。
+- **有界租约**：进程在 `sending` 状态崩溃时，记录不会永久卡死；超过 `REPLY_SEND_CLAIM_TIMEOUT_SECONDS` 后可以恢复领取。
+
+还要明确交付语义：本项目保证原子 claim 和终态事件去重，但远端 WebSocket 没有可用的业务幂等键。若远端已收到消息、本地却在 `mark_sent` 前崩溃，重试可能再次发送。因此这里是带去重保护的 at-least-once 执行，而不是凭空宣称 exactly-once。面试中主动说明这个 ACK 窗口，反而更能体现你理解分布式副作用的真实边界。
 
 ### 如何验证本课
 
 ```bash
 pytest tests/test_human_style.py -q
 pytest tests/test_reply_outbox.py -q
+pytest tests/test_live_reply_execution.py -q
 python main.py --mode smoke
+python main.py --mode replay
 ```
 
 你应该看到：
 
 - 机器腔回复会被改写，trace 中出现 `human_reply_style` 和 `human_style_rewrite`。
 - 同一个源消息只能 claim 一次发送权。
-- 发送失败后可以再次 claim，形成可重试执行语义。
+- 发送失败后复用原回复再次 claim，不增加会话记忆。
+- 8 个并发 worker 抢占同一记录时，只有 1 个成功。
+- 过期的 `sending` lease 可以恢复，dry-run 回放不会产生网络发送。
 
 ### 面试讲法
 
 我没有只靠 prompt 让 Agent “像真人”，而是把表达风格做成可配置、可测试、可观测的后处理护栏。生成前提示模型用个人卖家口吻，生成后再检测和清洗机器腔表达，并把结果写入 trace。
 
-同时，真实平台自动回复不能直接调用 send。我设计了 Reply Outbox：每条待发送回复先落库，再抢占发送权，发送成功/失败都有状态记录。这样 WebSocket 重连或重复同步不会造成重复回复，失败也可以重试。这是从 demo 走向生产级 Agent 的关键执行边界。
+同时，真实平台自动回复不能直接调用 send。我设计了 Reply Outbox：每条待发送回复先落库，用 SQLite 原子事务抢占发送权，发送成功/失败都有状态记录；失败时只重试已确定的副作用，不重新调用 LLM。再通过发送租约恢复崩溃中断的任务，使 WebSocket 重连、重复同步和进程异常都不会轻易造成重复回复或永久卡单。这是从 demo 走向生产级 Agent 的关键执行边界。

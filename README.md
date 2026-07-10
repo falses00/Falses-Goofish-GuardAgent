@@ -22,7 +22,7 @@
 - **规则负责底线**：价格、承诺、商品事实由确定性代码控制。
 - **SQLite 负责记忆**：多轮会话中记录历史报价和买家最高出价。
 - **Style 负责人味**：拦截“作为 AI 客服”“感谢咨询”等机器腔，让回复更像真实个人卖家。
-- **Outbox 负责执行**：真实发送前先登记、抢占发送权、标记成功/失败，避免重复回复。
+- **Outbox 负责执行**：真实发送前先登记并原子抢占发送权；失败重试复用原回复，避免重复调用模型和重复写记忆。
 - **Trace 负责解释**：每轮回复记录路由、护栏、定价来源和知识命中。
 - **本地模式负责调试**：不接入闲鱼也能复现议价和咨询链路。
 - **服务接口负责集成**：通过 FastAPI 暴露 `/api/reply`，让 Agent 能接入 Web 管理台、移动端映射或后续 MCP 工具。
@@ -71,6 +71,14 @@ python main.py --mode xianyu
 ```
 
 该模式需要 `COOKIES_STR`，用于连接闲鱼 / Goofish WebSocket 并自动处理消息。仍建议先用 CLI 模式验证商品数据、提示词和价格策略。
+
+接入真实 Cookie 前，可先运行与 live 共用处理函数的离线回放：
+
+```bash
+python main.py --mode replay
+```
+
+`replay` 会让一条买家消息真实穿过商品上下文、Agent、SQLite 记忆和 Reply Outbox，再重复投递同一个源事件。它固定启用 dry-run，并断言只生成一轮记忆、只领取一次发送权且网络发送次数为 0。
 
 ### 6. AgentTrace 可观测链路
 
@@ -147,16 +155,21 @@ curl -X POST http://127.0.0.1:8000/api/reply ^
 
 真实闲鱼 WebSocket 同步可能因为重连、ACK、重复推送导致同一条买家消息被处理多次。`core/reply_outbox.py` 在真实发送前落库并抢占发送权：
 
-- 同一个源消息事件只允许发送一次。
+- 同一个源消息事件同一时刻只允许一个 worker 持有发送权，已完成事件的重复投递会被抑制。
+- `pending` 或 `failed` 事件恢复时直接发送已落库回复，不会再次调用 Agent 或重复写记忆。
+- SQLite 原子事务保证并发 worker 只有一个能取得发送权。
+- 超时的 `sending` 记录可按 lease 重新领取，避免进程崩溃后永久卡住。
 - 发送成功后标记 `sent`，重复事件直接跳过。
 - 发送失败后标记 `failed`，允许后续重试。
 - `REPLY_SEND_DRY_RUN=true` 时只记录不真实发送，适合接入真实 Cookie 前压测。
+
+这里采用的是“持久化 Outbox + at-least-once 重试 + 进程内并发幂等”。闲鱼 WebSocket 发送接口没有暴露业务幂等键，因此如果消息已经到达平台、进程却在 `mark_sent` 前崩溃，恢复重试仍存在极小的重复发送窗口。生产上需要平台 ACK/幂等键或人工审计来进一步收敛，项目不会把这一点包装成不存在的 exactly-once 保证。
 
 ## 项目结构
 
 ```text
 Falses-Goofish-GuardAgent/
-├── main.py                     # 启动入口：xianyu / cli 两种模式
+├── main.py                     # 启动入口：xianyu / cli / smoke / replay
 ├── XianyuAgent.py              # 意图路由、价格 Agent、详情 Agent、默认 Agent
 ├── XianyuApis.py               # 闲鱼 / Goofish API 与 WebSocket 封装
 ├── context_manager.py          # SQLite 会话历史、议价次数、价格承诺记忆
@@ -265,7 +278,15 @@ python main.py --mode smoke
 
 `smoke` 模式不需要真实 Cookie 或外部 LLM API，会使用内置离线 LLM stub 真实穿过入口、意图路由、Agent、SQLite 记忆、议价护栏、商品知识库和 `AgentTrace`。它适合在提交前快速确认项目能跑通一轮完整买家咨询/砍价流程。
 
-### 4.2 启动 Agent API
+### 4.2 实时执行链离线回放
+
+```bash
+python main.py --mode replay
+```
+
+`replay` 不需要 Cookie 或外部 LLM API，但会调用与闲鱼挂机模式相同的 `_process_buyer_message -> ReplyOutbox -> send` 执行链。它验证 dry-run 零网络发送、同一事件重复投递不重复生成回复，并输出 Outbox 状态、领取次数和记忆条数。
+
+### 4.3 启动 Agent API
 
 ```bash
 $env:API_OFFLINE_MODE="true"
@@ -351,6 +372,7 @@ python tools/run_agent_eval.py --min-score 1.0
 | `HUMAN_REPLY_STYLE_PATH` | 真人卖家回复风格配置路径，默认 `data/human_reply_style.json` |
 | `REPLY_OUTBOX_DB_PATH` | 自动回复执行 Outbox SQLite 路径，默认 `data/reply_outbox.db` |
 | `REPLY_SEND_DRY_RUN` | 是否只记录 Outbox 而不真实发送，接真实 Cookie 前可设为 `true` |
+| `REPLY_SEND_CLAIM_TIMEOUT_SECONDS` | `sending` 状态的租约超时，默认 300 秒；超时后允许恢复发送 |
 | `MESSAGE_AGGREGATION_ENABLED` | 是否启用连续买家消息聚合，默认 `true` |
 | `MESSAGE_AGGREGATION_WINDOW_SECONDS` | 聚合窗口秒数，默认 `1.2` |
 | `MESSAGE_AGGREGATION_MAX_MESSAGES` | 单批最多聚合消息数，达到后立即触发 |

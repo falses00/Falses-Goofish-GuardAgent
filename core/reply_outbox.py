@@ -3,7 +3,7 @@ import json
 import os
 import sqlite3
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
 
@@ -22,6 +22,7 @@ class ReplyOutboxRecord:
     status: str
     attempt_count: int
     last_error: Optional[str] = None
+    updated_at: Optional[str] = None
     created: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
@@ -47,8 +48,9 @@ class ReplyOutbox:
     Durable execution queue for Xianyu reply sending.
 
     The LLM decides what to say, but the outbox decides whether this exact source
-    event is still allowed to be sent. This prevents duplicate replies after
-    reconnects, retries, or repeated sync packages.
+    event is still allowed to be sent. This blocks concurrent duplicate sends
+    and suppresses replayed terminal events. End-to-end exactly-once delivery
+    still depends on idempotency or acknowledgements from the remote platform.
     """
 
     def __init__(self, db_path: Optional[str] = None):
@@ -152,15 +154,26 @@ class ReplyOutbox:
         finally:
             conn.close()
 
-    def claim_for_send(self, dedupe_key: str) -> ReplySendClaim:
-        conn = sqlite3.connect(self.db_path)
+    def claim_for_send(self, dedupe_key: str, stale_after_seconds: int = 300) -> ReplySendClaim:
+        now = datetime.now()
+        stale_before = (now - timedelta(seconds=max(0, stale_after_seconds))).isoformat()
+        conn = sqlite3.connect(self.db_path, timeout=30)
         cursor = conn.cursor()
         try:
+            # Serialize the read-and-claim transition so concurrent workers cannot
+            # both observe a pending record and send the same reply.
+            cursor.execute("BEGIN IMMEDIATE")
             record = self._fetch_by_key(cursor, dedupe_key)
             if record.status in TERMINAL_STATUSES:
+                conn.commit()
                 return ReplySendClaim(False, record, f"already_{record.status}")
-            if record.status == "sending":
+            if record.status == "sending" and (record.updated_at or "") > stale_before:
+                conn.commit()
                 return ReplySendClaim(False, record, "already_sending")
+
+            if record.status not in {"pending", "failed", "sending"}:
+                conn.commit()
+                return ReplySendClaim(False, record, f"unsupported_status_{record.status}")
 
             cursor.execute(
                 """
@@ -170,11 +183,20 @@ class ReplyOutbox:
                     last_error = NULL,
                     updated_at = ?
                 WHERE dedupe_key = ?
+                  AND (
+                    status IN ('pending', 'failed')
+                    OR (status = 'sending' AND updated_at <= ?)
+                  )
                 """,
-                (datetime.now().isoformat(), dedupe_key),
+                (now.isoformat(), dedupe_key, stale_before),
             )
+            if cursor.rowcount != 1:
+                conn.commit()
+                current = self._fetch_by_key(cursor, dedupe_key)
+                return ReplySendClaim(False, current, f"already_{current.status}")
             conn.commit()
-            return ReplySendClaim(True, self._fetch_by_key(cursor, dedupe_key), "claimed")
+            reason = "reclaimed_stale_sending" if record.status == "sending" else "claimed"
+            return ReplySendClaim(True, self._fetch_by_key(cursor, dedupe_key), reason)
         finally:
             conn.close()
 
@@ -229,7 +251,7 @@ class ReplyOutbox:
         cursor.execute(
             """
             SELECT id, dedupe_key, chat_id, item_id, user_id, source_message_id,
-                   reply_text, status, attempt_count, last_error
+                   reply_text, status, attempt_count, last_error, updated_at
             FROM reply_outbox
             WHERE dedupe_key = ?
             """,

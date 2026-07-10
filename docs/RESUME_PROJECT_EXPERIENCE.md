@@ -36,7 +36,7 @@ Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、pytest、Rich CL
 - 设计连续消息聚合模块，在 Agent loop 前按 `chat_id + item_id + user_id` 对买家短时间多条消息进行 debounce 合并，将平台事件流稳定为业务 turn，减少重复回复、半截上下文污染和无效 LLM 调用。
 - 设计商品规则中心，将允许承诺、禁止承诺、售后边界和发货条件从 Prompt 中抽离为结构化 JSON 规则；回复前注入规则上下文，回复后做禁止承诺校验，避免模型编造成功率、内部渠道、平台外交易等高风险话术。
 - 设计真人化回复风格层，将“像真实闲鱼个人卖家”从 prompt 口号落成可配置护栏；生成前注入口语化约束，生成后确定性清洗“作为 AI 客服”“感谢咨询”等机器腔表达，并将改写结果写入 Trace。
-- 设计回复执行 Outbox，在真实 WebSocket 发送前持久化待发送回复并抢占发送权，支持 `pending / sending / sent / failed / skipped` 状态流转，避免重连或重复同步导致重复回复，并为失败重试提供执行记录。
+- 设计回复执行 Outbox，在真实 WebSocket 发送前持久化回复，基于 SQLite 原子事务实现并发安全 claim 与 `pending / sending / sent / failed / skipped` 状态流转；失败恢复复用原回复、避免二次 LLM 调用和重复记忆写入，并通过超时 lease 恢复进程崩溃造成的卡单，同时明确远端无幂等键时的 ACK 重复窗口。
 - 实现交付决策引擎，根据商品类型、订单状态和是否需要人工确认输出 `wait_for_payment / manual_review / auto_deliver` 等可审计动作，为后续自动发货执行层提供安全前置判断。
 - 设计 `BargainExpert` 确定性议价策略，将价格底线、历史承诺价、买家最高出价从 LLM Prompt 中剥离为代码级约束，避免模型被诱导突破底价或前后报价不一致。
 - 基于 SQLite 实现会话级状态记忆，持久化聊天历史、议价次数、我方最低承诺价和买家最高出价；通过事务化 `append_turn` 原子写入用户消息、助手回复和议价次数，避免半轮上下文污染，并采用单调更新策略保证价格承诺只降不升、买家报价只取最高。
@@ -47,6 +47,7 @@ Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、pytest、Rich CL
 - 构建本地 Mock CLI 调试模式，无需真实闲鱼 Cookie 即可模拟买家咨询和砍价，提升项目演示、策略调参和回归验证效率。
 - 使用 pytest 覆盖议价边界、历史承诺不抬价、商品级底价优先、无效折扣回退、规格数字误判报价、RAG 命中/未命中、SQLite 单调记忆、API 结构化响应和空消息 422 失败路径等核心路径。
 - 新增 `python main.py --mode smoke` 离线端到端自检，使用内置 LLM stub 真实穿过入口、路由、Agent、SQLite 记忆、Trace 和回复生成链路，降低回归验证对真实 Cookie/API Key 的依赖。
+- 新增 `python main.py --mode replay` 实时执行链离线回放，复用挂机模式的消息处理与 Outbox 代码，验证 dry-run 零网络副作用、重复事件抑制、发送失败重试和记忆一致性。
 - 构建离线 Agent 评测 harness，将真实交易对话抽象为黄金评测集，基于 trace-level 断言评估意图路由、RAG 命中、护栏触发、价格决策和最终记忆状态，并接入 GitHub Actions 作为 CI 质量门禁。
 
 ## 面试讲述版本
@@ -58,7 +59,7 @@ Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、pytest、Rich CL
 1. **路由层**：先通过关键词和正则判断咨询、议价、闲聊，规则兜不住再交给分类 Agent。
 2. **策略层**：议价由 `BargainExpert` 计算安全价格，商品咨询由 `FAQExpert` 从本地 JSON 知识库抽取事实，商品规则中心控制承诺边界。
 3. **表达层**：把策略结果注入 Prompt，让 LLM 生成自然话术，再由 `HumanReplyStyler` 清洗机器腔和客服腔。
-4. **执行层**：真实发送前进入 Reply Outbox，按源消息去重、抢占发送权、记录发送成功或失败。
+4. **执行层**：真实发送前进入 Reply Outbox，按源消息去重并原子抢占发送权；发送失败只重试已落库回复，租约超时后可恢复中断任务。
 5. **服务与评测层**：FastAPI 暴露 typed contract，JSONL trace 支持回放，golden eval 和 pytest 在 CI 中阻断回归。
 
 为了让系统可调试，我加了 `AgentTrace`，每次回复都会记录意图、路由、价格决策、知识命中和护栏。这样出了问题不是猜 Prompt，而是能直接看到决策链路。
@@ -68,7 +69,7 @@ Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、pytest、Rich CL
 如果需要放在简历里更偏结果，可以写：
 
 - 将原项目从单一自动回复改造为 4 类 Agent 协同链路，补齐价格护栏、商品事实约束、会话记忆、服务接口、trace 回放和本地调试能力。
-- 为核心决策路径补充 30+ 个单元 / API 测试，覆盖正常路径、边界值、错误配置、对抗输入、消息聚合状态机、真人化回复、回复 Outbox 去重/重试、规则护栏、交付决策和 HTTP 失败路径。
+- 为核心决策路径补充 35+ 个单元 / API 测试，覆盖正常路径、边界值、错误配置、对抗输入、消息聚合状态机、真人化回复、Outbox 并发 claim / 失败恢复 / 租约回收、规则护栏、交付决策和 HTTP 失败路径。
 - 将真实闲鱼挂机链路与本地 Mock 演示链路统一到同一套 Agent 决策核心，降低调试和演示对平台 Cookie 的依赖。
 - 基于黄金交易场景构建离线 Agent eval gate，检查 intent、routed agent、guardrails、RAG grounding、price decision 和 memory consistency，避免只用最终自然语言回复判断质量。
 

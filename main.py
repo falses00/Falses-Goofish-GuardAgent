@@ -21,15 +21,30 @@ from core.reply_outbox import ReplyOutbox
 
 
 class XianyuLive:
-    def __init__(self, cookies_str):
-        self.xianyu = XianyuApis()
+    def __init__(
+        self,
+        cookies_str,
+        reply_bot=None,
+        context_manager=None,
+        xianyu_api=None,
+        reply_outbox=None,
+        seller_id=None,
+        reply_send_dry_run=None,
+    ):
+        self.xianyu = xianyu_api or XianyuApis()
         self.base_url = 'wss://wss-goofish.dingtalk.com/'
-        self.cookies_str = cookies_str
-        self.cookies = trans_cookies(cookies_str)
-        self.xianyu.session.cookies.update(self.cookies)  # 直接使用 session.cookies.update
-        self.myid = self.cookies['unb']
+        self.cookies_str = cookies_str or ""
+        self.cookies = trans_cookies(self.cookies_str)
+        if getattr(self.xianyu, "session", None) is not None:
+            self.xianyu.session.cookies.update(self.cookies)
+        self.myid = seller_id or self.cookies.get('unb')
+        if not self.myid:
+            raise ValueError("XianyuLive requires the unb cookie or an explicit seller_id")
         self.device_id = generate_device_id(self.myid)
-        self.context_manager = ChatContextManager()
+        self.bot = reply_bot or XianyuReplyBot()
+        if context_manager is not None and context_manager is not self.bot.db:
+            raise ValueError("XianyuLive and XianyuReplyBot must share one ChatContextManager instance")
+        self.context_manager = context_manager or self.bot.db
 
         # 心跳相关配置
         self.heartbeat_interval = int(os.getenv("HEARTBEAT_INTERVAL", "15"))  # 心跳间隔，默认15秒
@@ -61,8 +76,11 @@ class XianyuLive:
             max_chars=int(os.getenv("MESSAGE_AGGREGATION_MAX_CHARS", "1200")),
         )
         self.message_flush_tasks = {}
-        self.reply_outbox = ReplyOutbox()
-        self.reply_send_dry_run = os.getenv("REPLY_SEND_DRY_RUN", "false").lower() in {"1", "true", "yes", "on"}
+        self.reply_outbox = reply_outbox or ReplyOutbox()
+        if reply_send_dry_run is None:
+            reply_send_dry_run = os.getenv("REPLY_SEND_DRY_RUN", "false").lower() in {"1", "true", "yes", "on"}
+        self.reply_send_dry_run = bool(reply_send_dry_run)
+        self.reply_send_claim_timeout_seconds = int(os.getenv("REPLY_SEND_CLAIM_TIMEOUT_SECONDS", "300"))
 
         # 人工接管关键词，从环境变量读取
         self.toggle_keywords = os.getenv("TOGGLE_KEYWORDS", "。")
@@ -382,11 +400,19 @@ class XianyuLive:
         )
         dedupe_key = ReplyOutbox.build_dedupe_key(chat_id, item_id, send_user_id, source_message_id)
         existing_record = self.reply_outbox.get(dedupe_key)
-        if existing_record and existing_record.status in {"pending", "sending", "sent", "skipped"}:
+        if existing_record:
+            if existing_record.status in {"sent", "skipped"}:
+                logger.info(
+                    f"检测到已完成买家消息事件，跳过重复 Agent 决策: chat_id={chat_id}, "
+                    f"item_id={item_id}, outbox_status={existing_record.status}"
+                )
+                return
+
             logger.info(
-                f"检测到重复买家消息事件，跳过重复 Agent 决策: chat_id={chat_id}, "
+                f"恢复已有回复发送，不重复调用 Agent: chat_id={chat_id}, "
                 f"item_id={item_id}, outbox_status={existing_record.status}"
             )
+            await self._deliver_outbox_record(websocket, existing_record)
             return
 
         # 从数据库中获取商品信息，如果不存在则从API获取并保存
@@ -406,7 +432,7 @@ class XianyuLive:
         item_description = f"当前商品的信息如下：{self.build_item_description(item_info)}"
 
         context = self.context_manager.get_context_by_chat(chat_id)
-        bot_reply = bot.generate_reply(
+        bot_reply = self.bot.generate_reply(
             send_message,
             item_description,
             context=context,
@@ -427,7 +453,7 @@ class XianyuLive:
                 send_message,
                 self.myid,
                 assistant_text=None,
-                intent=bot.last_intent
+                intent=self.bot.last_intent
             )
             no_reply_record = self.reply_outbox.enqueue(
                 chat_id=chat_id,
@@ -435,7 +461,7 @@ class XianyuLive:
                 user_id=send_user_id,
                 source_message_id=source_message_id,
                 reply_text="-",
-                trace=bot.last_trace.to_dict(),
+                trace=self.bot.last_trace.to_dict(),
             )
             self.reply_outbox.mark_skipped(no_reply_record.dedupe_key, "no_reply")
             return
@@ -447,14 +473,14 @@ class XianyuLive:
             send_message,
             self.myid,
             assistant_text=bot_reply,
-            intent=bot.last_intent
+            intent=self.bot.last_intent
         )
-        if bot.last_intent == "price":
+        if self.bot.last_intent == "price":
             bargain_count = self.context_manager.get_bargain_count_by_chat(chat_id)
             logger.info(f"用户 {send_user_name} 对商品 {item_id} 的议价次数: {bargain_count}")
 
         logger.info(f"机器人回复: {bot_reply}")
-        trace = bot.last_trace.to_dict()
+        trace = self.bot.last_trace.to_dict()
         outbox_record = self.reply_outbox.enqueue(
             chat_id=chat_id,
             item_id=item_id,
@@ -463,38 +489,49 @@ class XianyuLive:
             reply_text=bot_reply,
             trace=trace,
         )
-        claim = self.reply_outbox.claim_for_send(outbox_record.dedupe_key)
+        await self._deliver_outbox_record(websocket, outbox_record)
+
+    async def _deliver_outbox_record(self, websocket, outbox_record):
+        claim = self.reply_outbox.claim_for_send(
+            outbox_record.dedupe_key,
+            stale_after_seconds=self.reply_send_claim_timeout_seconds,
+        )
         if not claim.claimed:
             logger.info(
-                f"回复发送跳过: chat_id={chat_id}, item_id={item_id}, "
+                f"回复发送跳过: chat_id={claim.record.chat_id}, item_id={claim.record.item_id}, "
                 f"reason={claim.reason}, outbox_status={claim.record.status}"
             )
             return
 
+        reply_text = claim.record.reply_text
+
         # 模拟人工输入延迟
         if self.simulate_human_typing:
             base_delay = random.uniform(0, 1)
-            typing_delay = len(bot_reply) * random.uniform(0.1, 0.3)
+            typing_delay = len(reply_text) * random.uniform(0.1, 0.3)
             total_delay = min(base_delay + typing_delay, 10.0)
             logger.info(f"模拟人工输入，延迟发送 {total_delay:.2f} 秒...")
             await asyncio.sleep(total_delay)
 
         if self.reply_send_dry_run:
-            self.reply_outbox.mark_skipped(outbox_record.dedupe_key, "dry_run")
-            logger.info(f"REPLY_SEND_DRY_RUN=true，仅记录不真实发送: chat_id={chat_id}, item_id={item_id}")
+            self.reply_outbox.mark_skipped(claim.record.dedupe_key, "dry_run")
+            logger.info(
+                f"REPLY_SEND_DRY_RUN=true，仅记录不真实发送: "
+                f"chat_id={claim.record.chat_id}, item_id={claim.record.item_id}"
+            )
             return
 
         try:
-            await self.send_msg(websocket, chat_id, send_user_id, bot_reply)
-            sent_record = self.reply_outbox.mark_sent(outbox_record.dedupe_key)
+            await self.send_msg(websocket, claim.record.chat_id, claim.record.user_id, reply_text)
+            sent_record = self.reply_outbox.mark_sent(claim.record.dedupe_key)
             logger.info(
-                f"回复发送成功: chat_id={chat_id}, item_id={item_id}, "
+                f"回复发送成功: chat_id={claim.record.chat_id}, item_id={claim.record.item_id}, "
                 f"outbox_id={sent_record.id}, attempts={sent_record.attempt_count}"
             )
         except Exception as exc:
-            failed_record = self.reply_outbox.mark_failed(outbox_record.dedupe_key, str(exc))
+            failed_record = self.reply_outbox.mark_failed(claim.record.dedupe_key, str(exc))
             logger.error(
-                f"回复发送失败: chat_id={chat_id}, item_id={item_id}, "
+                f"回复发送失败: chat_id={claim.record.chat_id}, item_id={claim.record.item_id}, "
                 f"outbox_id={failed_record.id}, error={exc}"
             )
             raise
@@ -1100,6 +1137,106 @@ def run_smoke_mode():
     print("SMOKE_DONE")
 
 
+async def run_replay_mode():
+    """Replay the live reply execution path without a real Cookie or network send."""
+    import tempfile
+
+    from core.evaluation import DeterministicLLMClient
+
+    class ReplaySession:
+        def __init__(self):
+            self.cookies = {}
+
+    class ReplayXianyuApi:
+        def __init__(self):
+            self.session = ReplaySession()
+
+        def get_item_info(self, item_id):
+            raise RuntimeError(f"replay item must be preloaded: {item_id}")
+
+    class ReplayWebSocket:
+        def __init__(self):
+            self.sent_payloads = []
+
+        async def send(self, payload):
+            self.sent_payloads.append(payload)
+
+    with tempfile.TemporaryDirectory(prefix="goofish-replay-") as temp_dir:
+        bot = XianyuReplyBot(
+            client=DeterministicLLMClient(),
+            db_path=os.path.join(temp_dir, "chat_history.db"),
+        )
+        outbox = ReplyOutbox(db_path=os.path.join(temp_dir, "reply_outbox.db"))
+        live = XianyuLive(
+            "unb=replay_seller",
+            reply_bot=bot,
+            context_manager=bot.db,
+            xianyu_api=ReplayXianyuApi(),
+            reply_outbox=outbox,
+            reply_send_dry_run=True,
+        )
+        websocket = ReplayWebSocket()
+        chat_id = "replay_chat_001"
+        item_id = "replay_item_001"
+        buyer_id = "replay_buyer_001"
+        buyer_message = "在吗，这个屏幕有划痕吗？"
+        source_message_id = ReplyOutbox.build_source_message_id(
+            chat_id,
+            item_id,
+            buyer_id,
+            buyer_message,
+            event_time_ms=1720000000000,
+        )
+        bot.db.save_item_info(item_id, {
+            "title": "二手 iPad Pro 11 寸",
+            "desc": "屏幕贴膜使用，无拆修，电池健康 93%",
+            "soldPrice": 4299,
+            "quantity": 1,
+            "skuList": [],
+        })
+
+        await live._process_buyer_message(
+            websocket,
+            chat_id,
+            buyer_id,
+            item_id,
+            buyer_message,
+            source_message_id=source_message_id,
+        )
+        await live._process_buyer_message(
+            websocket,
+            chat_id,
+            buyer_id,
+            item_id,
+            buyer_message,
+            source_message_id=source_message_id,
+        )
+
+        dedupe_key = ReplyOutbox.build_dedupe_key(chat_id, item_id, buyer_id, source_message_id)
+        record = outbox.get(dedupe_key)
+        snapshot = bot.db.get_memory_snapshot(chat_id)
+        result = {
+            "replay_result": "ok",
+            "outbox_status": record.status,
+            "attempt_count": record.attempt_count,
+            "memory_messages": len(snapshot.messages),
+            "network_sends": len(websocket.sent_payloads),
+            "duplicate_event_suppressed": len(snapshot.messages) == 2,
+        }
+        if result != {
+            "replay_result": "ok",
+            "outbox_status": "skipped",
+            "attempt_count": 1,
+            "memory_messages": 2,
+            "network_sends": 0,
+            "duplicate_event_suppressed": True,
+        }:
+            raise RuntimeError(f"live replay verification failed: {result}")
+        print("REPLAY_START")
+        print(json.dumps(result, ensure_ascii=False))
+        print("REPLAY_DONE")
+
+
 def check_and_complete_env():
     """检查并补全关键环境变量"""
     placeholder_values = {
@@ -1160,8 +1297,8 @@ if __name__ == '__main__':
         "--mode",
         type=str,
         default="xianyu",
-        choices=["xianyu", "cli", "smoke"],
-        help="运行模式：xianyu (咸鱼 WebSocket 挂机模式，需 Cookie)；cli (本地命令行交互 Mock 调试)；smoke (离线端到端自检)"
+        choices=["xianyu", "cli", "smoke", "replay"],
+        help="运行模式：xianyu (咸鱼 WebSocket 挂机模式，需 Cookie)；cli (本地命令行交互 Mock 调试)；smoke (离线 Agent 自检)；replay (离线执行链回放)"
     )
     args = parser.parse_args()
 
@@ -1201,10 +1338,12 @@ if __name__ == '__main__':
         asyncio.run(run_cli_mode())
     elif args.mode == "smoke":
         run_smoke_mode()
+    elif args.mode == "replay":
+        asyncio.run(run_replay_mode())
     else:
         # 挂机长连接模式下，交互式检查并补全 Cookie 和 API_KEY
         check_and_complete_env()
         cookies_str = os.getenv("COOKIES_STR")
         bot = XianyuReplyBot()
-        xianyuLive = XianyuLive(cookies_str)
+        xianyuLive = XianyuLive(cookies_str, reply_bot=bot, context_manager=bot.db)
         asyncio.run(xianyuLive.main())
