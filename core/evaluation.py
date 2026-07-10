@@ -124,7 +124,7 @@ class AgentEvaluator:
         turn_results = []
         for index, turn in enumerate(case["turns"]):
             context = bot.db.get_context_by_chat(chat_id)
-            reply = bot.generate_reply(turn["user"], item_description, context=context, chat_id=chat_id)
+            reply = bot.generate_reply(turn["user"], item_description, context=context, chat_id=chat_id, item_id=item_id)
             bot.db.append_turn(
                 chat_id=chat_id,
                 user_id="eval_buyer",

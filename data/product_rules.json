@@ -1,0 +1,104 @@
+{
+  "version": 1,
+  "fallback_rule": {
+    "rule_id": "default_safe_trade",
+    "title": "默认安全交易规则",
+    "item_ids": [],
+    "match_titles": [],
+    "refund_policy": "未配置专属规则时，只能基于商品详情谨慎说明；不承诺未写明的售后、资格、发货时效或成功率。",
+    "allowed_promises": [
+      "可以按商品详情说明真实情况",
+      "付款后按平台订单流程处理",
+      "不确定的信息需要人工确认后再答复"
+    ],
+    "forbidden_promises": [
+      "百分百成功",
+      "100%成功",
+      "官方内部渠道",
+      "绕过平台规则",
+      "保证过审",
+      "平台外交易"
+    ],
+    "uncertainty_reply": "这个我不能乱承诺，需要按商品说明和平台订单状态来处理。",
+    "delivery": {
+      "type": "manual_review",
+      "after": "paid",
+      "requires_manual_confirm": true,
+      "content_ref": "",
+      "message_template": "订单状态确认后我再按商品规则处理发货。"
+    }
+  },
+  "rules": [
+    {
+      "rule_id": "ipad_pro_m2_physical_trade",
+      "title": "二手 iPad Pro 实物交易规则",
+      "item_ids": [
+        "smoke_item_001",
+        "eval_item",
+        "api_item_001",
+        "item_ipad",
+        "mock_item_001"
+      ],
+      "match_titles": [
+        "iPad Pro",
+        "二手 iPad"
+      ],
+      "refund_policy": "二手实物商品支持平台内沟通与订单流程；签收前以商品描述和实际验货为准，不承诺平台外售后。",
+      "allowed_promises": [
+        "可说明成色、电池、配件、拆修和发货地",
+        "可在平台内协商价格",
+        "付款后按平台订单和物流流程发货"
+      ],
+      "forbidden_promises": [
+        "百分百全新",
+        "官方未拆封",
+        "永久保修",
+        "平台外交易",
+        "加微信",
+        "走支付宝"
+      ],
+      "uncertainty_reply": "这类实物细节我按商品信息如实说，不确定的地方可以付款前继续在平台里确认。",
+      "delivery": {
+        "type": "physical_shipping",
+        "after": "paid",
+        "requires_manual_confirm": true,
+        "content_ref": "",
+        "message_template": "确认订单已付款后，我会按平台物流流程安排发货。"
+      }
+    },
+    {
+      "rule_id": "aliyun_coupon_300_tutorial",
+      "title": "阿里云优惠 300 教程交付规则",
+      "item_ids": [
+        "aliyun_coupon_300"
+      ],
+      "match_titles": [
+        "阿里云优惠300",
+        "阿里云优惠 300",
+        "阿里云300优惠"
+      ],
+      "refund_policy": "虚拟教程类商品发出后不支持无理由退款；如教程链接失效，可在平台内补发可用教程说明。",
+      "allowed_promises": [
+        "可提供领取路径和操作步骤",
+        "可说明适用条件和常见失败原因",
+        "可在付款后通过平台聊天发送教程"
+      ],
+      "forbidden_promises": [
+        "百分百成功",
+        "100%成功",
+        "官方内部渠道",
+        "绕过平台规则",
+        "保证每个账号都能领取",
+        "平台外交易"
+      ],
+      "uncertainty_reply": "优惠资格通常由平台账号条件决定，我能提供教程和排查步骤，但不能保证每个账号一定领取成功。",
+      "delivery": {
+        "type": "digital_link",
+        "after": "paid",
+        "requires_manual_confirm": false,
+        "content_ref": "delivery_templates/aliyun_coupon_300.md",
+        "message_template": "已收到订单。这里是阿里云优惠 300 教程：请按教程步骤领取；如果页面提示不符合资格，把提示截图发我，我按常见原因帮你排查。"
+      }
+    }
+  ]
+}

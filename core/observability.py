@@ -15,6 +15,7 @@ class AgentTrace:
     guardrails: List[str] = field(default_factory=list)
     price_decision: Dict[str, Any] = field(default_factory=dict)
     knowledge: Dict[str, Any] = field(default_factory=dict)
+    rules: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

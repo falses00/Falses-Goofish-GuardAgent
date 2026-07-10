@@ -123,6 +123,7 @@ def create_app(
             item_description,
             context=context,
             chat_id=request.chat_id,
+            item_id=request.item_id,
         )
 
         if request.persist_turn:

@@ -31,8 +31,10 @@ The project already had routing, SQLite memory, trace logging, smoke mode, deter
 
 - `api/app.py`: FastAPI service wrapper around the same `XianyuReplyBot` core with typed request / response models.
 - `core/message_aggregation.py`: input-boundary debounce layer that turns bursty platform events into one stable user turn before routing.
+- `core/product_rules.py`: structured product rule center for allowed promises, forbidden promises, refund boundaries, and auditable delivery decisions.
 - `core/trace_store.py`: append-only JSONL trace store for replaying recent Agent decisions.
 - `tests/test_message_aggregation.py`: deterministic state-machine tests for message batching, isolation, and force-flush behavior.
+- `tests/test_product_rules.py`: rule-center tests for product matching, unpaid delivery blocking, digital auto-delivery decisions, physical manual review, and forbidden-promise interception.
 - `tests/test_api.py`: API tests for health, tech routing, price guardrails, trace lookup, memory persistence, batched user input, and invalid request rejection.
 - `evals/agent_eval_cases.json`: curated golden scenarios covering product facts, lowball negotiation, serious offers, commitment consistency, and fallback chat.
 - `core/evaluation.py`: deterministic offline evaluation harness with trace-aware assertions.
@@ -57,4 +59,4 @@ Then explain:
 
 ## Resume Upgrade Line
 
-Built a service-oriented transaction Agent with deterministic guardrails, SQLite memory, typed FastAPI interfaces, JSONL trace replay, golden-scenario evals, and CI quality gates, measuring intent routing, RAG grounding, pricing decisions, invalid input handling, and memory consistency across multi-turn workflows.
+Built a service-oriented transaction Agent with deterministic guardrails, structured product rules, auditable delivery decisions, SQLite memory, typed FastAPI interfaces, JSONL trace replay, golden-scenario evals, and CI quality gates, measuring intent routing, RAG grounding, pricing decisions, invalid input handling, forbidden-promise blocking, delivery readiness, and memory consistency across multi-turn workflows.

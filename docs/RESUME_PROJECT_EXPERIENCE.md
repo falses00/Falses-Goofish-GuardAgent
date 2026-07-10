@@ -34,6 +34,8 @@ Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、pytest、Rich CL
 - 二次开发闲鱼 AI 客服系统，重构为 `IntentRouter -> PriceAgent / TechAgent / DefaultAgent -> Guardrails -> LLM` 的多 Agent 决策链路，实现咨询、议价、闲聊等场景的可控分发。
 - 抽象 `model_provider` 配置层，默认接入 Agnes AI 的 OpenAI-compatible Chat Completions API，同时保留 `API_KEY / MODEL_BASE_URL / MODEL_NAME` 兼容路径，降低后续模型切换成本。
 - 设计连续消息聚合模块，在 Agent loop 前按 `chat_id + item_id + user_id` 对买家短时间多条消息进行 debounce 合并，将平台事件流稳定为业务 turn，减少重复回复、半截上下文污染和无效 LLM 调用。
+- 设计商品规则中心，将允许承诺、禁止承诺、售后边界和发货条件从 Prompt 中抽离为结构化 JSON 规则；回复前注入规则上下文，回复后做禁止承诺校验，避免模型编造成功率、内部渠道、平台外交易等高风险话术。
+- 实现交付决策引擎，根据商品类型、订单状态和是否需要人工确认输出 `wait_for_payment / manual_review / auto_deliver` 等可审计动作，为后续自动发货执行层提供安全前置判断。
 - 设计 `BargainExpert` 确定性议价策略，将价格底线、历史承诺价、买家最高出价从 LLM Prompt 中剥离为代码级约束，避免模型被诱导突破底价或前后报价不一致。
 - 基于 SQLite 实现会话级状态记忆，持久化聊天历史、议价次数、我方最低承诺价和买家最高出价；通过事务化 `append_turn` 原子写入用户消息、助手回复和议价次数，避免半轮上下文污染，并采用单调更新策略保证价格承诺只降不升、买家报价只取最高。
 - 引入 JSON 商品知识库与 `FAQExpert`，针对成色、拆修、配件、物流、面交等高风险问题注入事实上下文，降低 LLM 编造商品信息导致售后纠纷的风险。
@@ -63,7 +65,7 @@ Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、pytest、Rich CL
 如果需要放在简历里更偏结果，可以写：
 
 - 将原项目从单一自动回复改造为 4 类 Agent 协同链路，补齐价格护栏、商品事实约束、会话记忆、服务接口、trace 回放和本地调试能力。
-- 为核心决策路径补充 20+ 个单元 / API 测试，覆盖正常路径、边界值、错误配置、对抗输入、消息聚合状态机和 HTTP 失败路径。
+- 为核心决策路径补充 25+ 个单元 / API 测试，覆盖正常路径、边界值、错误配置、对抗输入、消息聚合状态机、规则护栏、交付决策和 HTTP 失败路径。
 - 将真实闲鱼挂机链路与本地 Mock 演示链路统一到同一套 Agent 决策核心，降低调试和演示对平台 Cookie 的依赖。
 - 基于黄金交易场景构建离线 Agent eval gate，检查 intent、routed agent、guardrails、RAG grounding、price decision 和 memory consistency，避免只用最终自然语言回复判断质量。
 

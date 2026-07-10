@@ -394,7 +394,8 @@ class XianyuLive:
             send_message,
             item_description,
             context=context,
-            chat_id=chat_id
+            chat_id=chat_id,
+            item_id=item_id,
         )
 
         if aggregation_count > 1:
@@ -895,7 +896,8 @@ async def run_cli_mode():
                     user_input,
                     item_description,
                     context=context,
-                    chat_id=chat_id
+                    chat_id=chat_id,
+                    item_id="mock_item_001",
                 )
 
                 bot.db.append_turn(
@@ -996,7 +998,7 @@ def run_smoke_mode():
     print("SMOKE_START")
     for user_input in buyer_messages:
         context = bot.db.get_context_by_chat(chat_id)
-        reply = bot.generate_reply(user_input, item_description, context=context, chat_id=chat_id)
+        reply = bot.generate_reply(user_input, item_description, context=context, chat_id=chat_id, item_id=item_id)
         bot.db.append_turn(
             chat_id,
             "smoke_buyer",

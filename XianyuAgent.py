@@ -8,6 +8,7 @@ from loguru import logger
 from core.experts import BargainExpert, FAQExpert
 from core.model_provider import create_model_client, get_model_name
 from core.observability import AgentTrace
+from core.product_rules import ProductRuleStore
 from context_manager import ChatContextManager
 
 
@@ -21,6 +22,7 @@ class XianyuReplyBot:
         self.client = client or create_model_client()
         # 初始化持久化数据库管理器，用于跟踪报价承诺
         self.db = ChatContextManager(db_path=db_path or os.getenv("CHAT_DB_PATH", "data/chat_history.db"))
+        self.rule_store = ProductRuleStore()
 
         self._init_system_prompts()
         self._init_agents()
@@ -73,15 +75,31 @@ class XianyuReplyBot:
         user_assistant_msgs = [msg for msg in context if msg['role'] in ['user', 'assistant']]
         return "\n".join([f"{msg['role']}: {msg['content']}" for msg in user_assistant_msgs])
 
-    def generate_reply(self, user_msg: str, item_desc: str, context: List[Dict], chat_id: str = "mock_chat_001") -> str:
+    def generate_reply(
+        self,
+        user_msg: str,
+        item_desc: str,
+        context: List[Dict],
+        chat_id: str = "mock_chat_001",
+        item_id: str = None,
+    ) -> str:
         """
         生成回复主流程（扩展了 chat_id 参数以支持会话级报价跟踪）
         """
         formatted_context = self.format_history(context)
         self.last_trace = AgentTrace(chat_id=chat_id, user_msg=user_msg)
+        product_rule = self.rule_store.resolve(item_id=item_id, item_desc=item_desc)
+        rule_context = self.rule_store.build_prompt_context(product_rule)
+        enriched_item_desc = f"{item_desc}\n{rule_context}"
+        self.last_trace.rules = {
+            "rule_id": product_rule.rule_id,
+            "delivery_type": product_rule.delivery.type,
+            "delivery_after": product_rule.delivery.after,
+            "requires_manual_confirm": product_rule.delivery.requires_manual_confirm,
+        }
 
         # 1. 三级意图分类路由决策
-        detected_intent = self.router.detect(user_msg, item_desc, formatted_context)
+        detected_intent = self.router.detect(user_msg, enriched_item_desc, formatted_context)
 
         internal_intents = {'classify'}  # 定义不对外开放的 Agent
 
@@ -110,18 +128,24 @@ class XianyuReplyBot:
         # 3. 驱动对应 Agent 生成最终润色回复
         reply = agent.generate(
             user_msg=user_msg,
-            item_desc=item_desc,
+            item_desc=enriched_item_desc,
             context=formatted_context,
             bargain_count=bargain_count,
             chat_id=chat_id
         )
+        validation = self.rule_store.validate_reply(reply, product_rule)
+        if not validation.safe:
+            logger.warning(f"回复触发商品规则护栏: rule_id={product_rule.rule_id}, violations={validation.violations}")
+            reply = self.rule_store.build_safe_reply(product_rule, validation)
+
         self.last_trace.intent = self.last_intent
         self.last_trace.routed_agent = agent.__class__.__name__
         self.last_trace.bargain_count = bargain_count
         agent_trace = getattr(agent, "last_trace", {})
-        self.last_trace.guardrails = agent_trace.get("guardrails", [])
+        self.last_trace.guardrails = list(dict.fromkeys(agent_trace.get("guardrails", []) + validation.guardrails))
         self.last_trace.price_decision = agent_trace.get("price_decision", {})
         self.last_trace.knowledge = agent_trace.get("knowledge", {})
+        self.last_trace.rules.update(validation.to_dict())
         logger.info(f"[AgentTrace] {json.dumps(self.last_trace.to_dict(), ensure_ascii=False)}")
         return reply
 
@@ -285,7 +309,8 @@ class PriceAgent(BaseAgent):
         if start == -1:
             return {}
         try:
-            return json.loads(item_desc[start:])
+            payload, _ = json.JSONDecoder().raw_decode(item_desc[start:])
+            return payload if isinstance(payload, dict) else {}
         except json.JSONDecodeError:
             logger.warning("商品描述中包含 JSON 起始符，但解析失败，降级使用文本价格提取")
             return {}

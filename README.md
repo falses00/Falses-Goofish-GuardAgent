@@ -8,7 +8,7 @@
 - 商品详情咨询时，LLM 不能编造配件、成色、拆修、发货信息。
 - 本地演示和迭代时，不必每次都依赖真实 Cookie 和真实买家消息。
 
-当前版本保留原项目的闲鱼 WebSocket 长连接能力，并新增本地 Mock CLI、HTTP Agent API、SQLite 价格承诺记忆、硬规则议价护栏、JSON 商品知识库、JSONL trace 回放和针对核心策略的自动化测试 / Agent 评测门禁。
+当前版本保留原项目的闲鱼 WebSocket 长连接能力，并新增本地 Mock CLI、HTTP Agent API、SQLite 价格承诺记忆、硬规则议价护栏、JSON 商品知识库、商品规则中心、交付决策引擎、JSONL trace 回放和针对核心策略的自动化测试 / Agent 评测门禁。
 
 仓库地址：[https://github.com/falses00/Falses-Goofish-GuardAgent](https://github.com/falses00/Falses-Goofish-GuardAgent)
 
@@ -122,6 +122,16 @@ curl -X POST http://127.0.0.1:8000/api/reply ^
 - `MESSAGE_AGGREGATION_MAX_MESSAGES=5`
 - `MESSAGE_AGGREGATION_MAX_CHARS=1200`
 
+### 9. 商品规则中心与交付决策
+
+`data/product_rules.json` 把商品承诺边界、售后边界、禁止承诺、发货条件和交付话术结构化。LLM 可以负责自然表达，但不能绕过这些规则。
+
+规则中心解决三类问题：
+
+- **降低幻觉**：禁止承诺“百分百成功”“官方内部渠道”等未授权说法。
+- **记住规矩**：每个商品有独立的退款、发货、允许/禁止承诺配置。
+- **发货前置判断**：`delivery_decision()` 会先判断订单是否满足付款条件、是否需要人工确认，再决定能否自动交付。
+
 ## 项目结构
 
 ```text
@@ -136,13 +146,15 @@ Falses-Goofish-GuardAgent/
 │   ├── message_aggregation.py  # 连续买家消息 debounce 聚合
 │   ├── model_provider.py       # Agnes / OpenAI-compatible 模型配置
 │   ├── observability.py        # AgentTrace 可观测结构
+│   ├── product_rules.py        # 商品规则中心与交付决策
 │   ├── evaluation.py           # 离线 LLM stub 与 Agent 评测 harness
 │   └── trace_store.py          # JSONL trace 持久化与回放
 ├── api/
 │   ├── __init__.py
 │   └── app.py                  # FastAPI Agent backend
 ├── data/
-│   └── product_info.json       # 示例商品知识库
+│   ├── product_info.json       # 示例商品知识库
+│   └── product_rules.json      # 商品承诺、售后和发货规则
 ├── evals/
 │   └── agent_eval_cases.json   # 交易场景黄金评测集
 ├── docs/
@@ -153,6 +165,7 @@ Falses-Goofish-GuardAgent/
 ├── tests/
 │   ├── test_agents.py          # 核心策略单元测试
 │   ├── test_message_aggregation.py # 消息聚合状态机测试
+│   ├── test_product_rules.py   # 规则中心与交付决策测试
 │   └── test_api.py             # HTTP API 与失败路径测试
 ├── .env.example                # 配置模板
 ├── requirements.txt
@@ -253,7 +266,7 @@ python main.py --mode xianyu
 ## 自动化测试
 
 ```bash
-pytest tests/test_agents.py tests/test_message_aggregation.py tests/test_api.py -q
+pytest tests/test_agents.py tests/test_message_aggregation.py tests/test_product_rules.py tests/test_api.py -q
 python main.py --mode smoke
 python tools/run_agent_eval.py --min-score 1.0
 ```
@@ -270,6 +283,7 @@ python tools/run_agent_eval.py --min-score 1.0
 - 规格数字不误判成买家报价。
 - 原子写入一轮对话记忆，避免半轮上下文。
 - 连续买家消息 debounce 聚合，避免多条短消息触发多次错误回复。
+- 商品规则中心，拦截违规承诺并按订单状态判断是否可自动交付。
 - FastAPI `/api/reply` 服务接口、memory snapshot、trace JSONL 回查。
 - 空消息等非法输入返回 422，避免脏请求进入 Agent 决策链路。
 - 离线 Agent 评测集，覆盖意图路由、RAG 命中、护栏触发、价格决策和最终记忆状态。
@@ -306,6 +320,7 @@ python tools/run_agent_eval.py --min-score 1.0
 | `MODEL_NAME` | 通用模型名称，兼容旧配置 |
 | `COOKIES_STR` | 闲鱼 / Goofish 网页端 Cookie，仅 xianyu 模式需要 |
 | `DEFAULT_DISCOUNT_LIMIT` | 最低折扣比例，例如 `0.85` 表示最多降到 8.5 折 |
+| `PRODUCT_RULES_PATH` | 商品规则中心路径，默认 `data/product_rules.json` |
 | `MESSAGE_AGGREGATION_ENABLED` | 是否启用连续买家消息聚合，默认 `true` |
 | `MESSAGE_AGGREGATION_WINDOW_SECONDS` | 聚合窗口秒数，默认 `1.2` |
 | `MESSAGE_AGGREGATION_MAX_MESSAGES` | 单批最多聚合消息数，达到后立即触发 |
