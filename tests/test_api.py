@@ -26,6 +26,19 @@ def test_health_reports_offline_mode(tmp_path):
     assert response.json() == {"status": "ok", "offline_mode": True}
 
 
+def test_capabilities_exposes_registered_intents(tmp_path):
+    client = build_client(tmp_path)
+
+    response = client.get("/api/capabilities")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "intents": ["price", "tech", "default"],
+        "offline_mode": True,
+        "extension_contract": "register_agent",
+    }
+
+
 def test_reply_routes_tech_question_and_persists_memory(tmp_path):
     client = build_client(tmp_path)
 

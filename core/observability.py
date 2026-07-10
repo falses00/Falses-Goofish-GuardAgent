@@ -15,6 +15,7 @@ class AgentTrace:
     guardrails: List[str] = field(default_factory=list)
     price_decision: Dict[str, Any] = field(default_factory=dict)
     knowledge: Dict[str, Any] = field(default_factory=dict)
+    model: Dict[str, Any] = field(default_factory=dict)
     rules: Dict[str, Any] = field(default_factory=dict)
     style: Dict[str, Any] = field(default_factory=dict)
 

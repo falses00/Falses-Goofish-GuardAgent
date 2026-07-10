@@ -240,3 +240,41 @@ python main.py --mode replay
 我没有只靠 prompt 让 Agent “像真人”，而是把表达风格做成可配置、可测试、可观测的后处理护栏。生成前提示模型用个人卖家口吻，生成后再检测和清洗机器腔表达，并把结果写入 trace。
 
 同时，真实平台自动回复不能直接调用 send。我设计了 Reply Outbox：每条待发送回复先落库，用 SQLite 原子事务抢占发送权，发送成功/失败都有状态记录；失败时只重试已确定的副作用，不重新调用 LLM。再通过发送租约恢复崩溃中断的任务，使 WebSocket 重连、重复同步和进程异常都不会轻易造成重复回复或永久卡单。这是从 demo 走向生产级 Agent 的关键执行边界。
+
+## Lesson 4: 扩展点、降级和部署必须共享同一套契约
+
+一个 Agent 项目是否可扩展，不取决于类的数量，而取决于新增能力是否必须修改中心主循环。本项目通过 `AgentRegistry` 把 `intent -> handler` 关系从 `generate_reply()` 中抽离：业务 Agent 只需实现 `generate(**kwargs)`，再注册关键词、正则和优先级。确定性规则先执行，规则无法判断时才调用分类 Agent；未知或内部意图统一落到默认 Agent。
+
+模型也不是可靠依赖。`BaseAgent._call_llm_with_fallback()` 把超时、空响应和 provider 异常转为确定性回复，并把 `model_fallback` 写入 Trace。价格 Agent 的降级话术使用代码计算出的唯一报价，商品咨询则只使用当前商品上下文，不能偷偷读取另一个商品的演示事实。
+
+部署层必须运行同一份代码。旧 Compose 拉取上游镜像，旧 Dockerfile 又漏掉 `core/` 和 `data/`，本地测试再绿也没有意义。现在 Compose 构建当前仓库，并通过 `python main.py --mode doctor` 做非交互配置检查；CI 还会实际执行 `docker build`。
+
+### 如何新增一个 Agent
+
+```python
+class ShippingAgent:
+    def __init__(self):
+        self.last_trace = {}
+
+    def generate(self, **kwargs):
+        self.last_trace = {"guardrails": ["shipping_policy"]}
+        return "付款后按平台订单发，具体时间以商品说明为准。"
+
+bot.register_agent(
+    "shipping",
+    ShippingAgent(),
+    keywords=["多久发货"],
+    priority=5,
+)
+```
+
+### 如何验证本课
+
+```bash
+pytest tests/test_agent_runtime.py -q
+python main.py --mode doctor
+docker compose config --quiet
+docker build -t falses-goofish-guardagent:local .
+```
+
+面试时可以这样概括：我把扩展能力设计成注册表和统一 handler 契约，把模型故障设计成可观测的确定性降级，把当前商品上下文设为事实隔离边界，再用 doctor 与 Docker CI 保证部署运行的确实是通过测试的这一份代码。

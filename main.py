@@ -7,7 +7,7 @@ import re
 import websockets
 from loguru import logger
 from dotenv import load_dotenv, set_key
-from XianyuApis import XianyuApis
+from XianyuApis import XianyuApis, XianyuAuthenticationError
 import sys
 import random
 
@@ -18,6 +18,7 @@ from context_manager import ChatContextManager
 from core.message_aggregation import MessageAggregator
 from core.model_provider import has_model_api_key
 from core.reply_outbox import ReplyOutbox
+from core.runtime_config import diagnose_runtime
 
 
 class XianyuLive:
@@ -61,6 +62,7 @@ class XianyuLive:
         self.current_token = None
         self.token_refresh_task = None
         self.connection_restart_flag = False  # 连接重启标志
+        self.authentication_error = None
 
         # 人工接管相关配置
         self.manual_mode_conversations = set()  # 存储处于人工接管模式的会话ID
@@ -93,7 +95,7 @@ class XianyuLive:
         try:
             logger.info("开始刷新token...")
 
-            # 获取新token（如果Cookie失效，get_token会直接退出程序）
+            # 获取新 token；认证失效会抛出 typed error 交给连接层处理。
             token_result = self.xianyu.get_token(self.device_id)
             if 'data' in token_result and 'accessToken' in token_result['data']:
                 new_token = token_result['data']['accessToken']
@@ -105,6 +107,8 @@ class XianyuLive:
                 logger.error(f"Token刷新失败: {token_result}")
                 return None
 
+        except XianyuAuthenticationError:
+            raise
         except Exception as e:
             logger.error(f"Token刷新异常: {str(e)}")
             return None
@@ -136,6 +140,15 @@ class XianyuLive:
                 # 每分钟检查一次
                 await asyncio.sleep(60)
 
+            except XianyuAuthenticationError as exc:
+                logger.error("Cookie 认证失效，停止 token 刷新任务")
+                non_interactive = os.getenv("NON_INTERACTIVE", "false").lower() in {"1", "true", "yes", "on"}
+                if non_interactive:
+                    self.authentication_error = exc
+                    if self.ws:
+                        await self.ws.close()
+                    return
+                await asyncio.sleep(self.token_retry_interval)
             except Exception as e:
                 logger.error(f"Token刷新循环出错: {e}")
                 await asyncio.sleep(60)
@@ -892,7 +905,16 @@ class XianyuLive:
                             logger.debug(f"原始消息: {message}")
 
             except websockets.exceptions.ConnectionClosed:
+                if self.authentication_error:
+                    raise self.authentication_error
                 logger.warning("WebSocket连接已关闭")
+
+            except XianyuAuthenticationError as exc:
+                logger.error(f"闲鱼认证不可用: {exc}")
+                non_interactive = os.getenv("NON_INTERACTIVE", "false").lower() in {"1", "true", "yes", "on"}
+                if non_interactive:
+                    raise
+                await asyncio.sleep(self.token_retry_interval)
 
             except Exception as e:
                 logger.error(f"连接发生错误: {e}")
@@ -1237,8 +1259,22 @@ async def run_replay_mode():
         print("REPLAY_DONE")
 
 
+def run_doctor_mode() -> bool:
+    """Print a secret-free readiness report for the real Xianyu runtime."""
+    report = diagnose_runtime(mode="xianyu")
+    print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+    return report.ready
+
+
 def check_and_complete_env():
     """检查并补全关键环境变量"""
+    non_interactive = os.getenv("NON_INTERACTIVE", "false").lower() in {"1", "true", "yes", "on"}
+    if non_interactive or not sys.stdin.isatty():
+        report = diagnose_runtime(mode="xianyu")
+        if not report.ready:
+            raise RuntimeError(f"运行配置未就绪: {report.failure_summary()}")
+        return
+
     placeholder_values = {
         "COOKIES_STR": {"your_cookies_here"},
     }
@@ -1297,8 +1333,8 @@ if __name__ == '__main__':
         "--mode",
         type=str,
         default="xianyu",
-        choices=["xianyu", "cli", "smoke", "replay"],
-        help="运行模式：xianyu (咸鱼 WebSocket 挂机模式，需 Cookie)；cli (本地命令行交互 Mock 调试)；smoke (离线 Agent 自检)；replay (离线执行链回放)"
+        choices=["xianyu", "cli", "smoke", "replay", "doctor"],
+        help="运行模式：xianyu (咸鱼 WebSocket 挂机模式，需 Cookie)；cli (本地命令行交互 Mock 调试)；smoke (离线 Agent 自检)；replay (离线执行链回放)；doctor (启动配置诊断)"
     )
     args = parser.parse_args()
 
@@ -1340,9 +1376,16 @@ if __name__ == '__main__':
         run_smoke_mode()
     elif args.mode == "replay":
         asyncio.run(run_replay_mode())
+    elif args.mode == "doctor":
+        if not run_doctor_mode():
+            sys.exit(1)
     else:
         # 挂机长连接模式下，交互式检查并补全 Cookie 和 API_KEY
-        check_and_complete_env()
+        try:
+            check_and_complete_env()
+        except RuntimeError as exc:
+            logger.error(str(exc))
+            sys.exit(2)
         cookies_str = os.getenv("COOKIES_STR")
         bot = XianyuReplyBot()
         xianyuLive = XianyuLive(cookies_str, reply_bot=bot, context_manager=bot.db)

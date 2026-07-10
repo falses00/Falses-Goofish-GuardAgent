@@ -1,11 +1,13 @@
 import json
 import os
 import re
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Tuple
 from loguru import logger
 
 # 引入二开新增专家模块与上下文数据库
 from core.experts import BargainExpert, FAQExpert
+from core.agent_registry import AgentRegistry
 from core.human_style import HumanReplyStyler
 from core.model_provider import create_model_client, get_model_name
 from core.observability import AgentTrace
@@ -25,21 +27,77 @@ class XianyuReplyBot:
         self.db = ChatContextManager(db_path=db_path or os.getenv("CHAT_DB_PATH", "data/chat_history.db"))
         self.rule_store = ProductRuleStore()
         self.human_styler = HumanReplyStyler()
+        self._extensions = {}
 
         self._init_system_prompts()
-        self._init_agents()
-        self.router = IntentRouter(self.agents['classify'])
+        self._rebuild_agent_runtime()
         self.last_intent = None  # 记录最后一次意图
         self.last_trace = AgentTrace()
 
     def _init_agents(self):
-        """初始化各领域 Agent (注入了数据库实例 self.db)"""
-        self.agents = {
-            'classify': ClassifyAgent(self.client, self.classify_prompt, self._safe_filter, self.db),
-            'price': PriceAgent(self.client, self.price_prompt, self._safe_filter, self.db),
-            'tech': TechAgent(self.client, self.tech_prompt, self._safe_filter, self.db),
-            'default': DefaultAgent(self.client, self.default_prompt, self._safe_filter, self.db),
-        }
+        """Build the built-in handlers through the same registry used by extensions."""
+        self.registry = AgentRegistry(fallback_intent="default")
+        self.registry.register(
+            "classify",
+            ClassifyAgent(self.client, self.classify_prompt, self._safe_filter, self.db),
+            internal=True,
+        )
+        self.registry.register("price", PriceAgent(self.client, self.price_prompt, self._safe_filter, self.db))
+        self.registry.register("tech", TechAgent(self.client, self.tech_prompt, self._safe_filter, self.db))
+        self.registry.register("default", DefaultAgent(self.client, self.default_prompt, self._safe_filter, self.db))
+
+    def _rebuild_agent_runtime(self):
+        self._init_agents()
+        self.router = IntentRouter(self.registry.require("classify"))
+        for extension in self._extensions.values():
+            self._apply_extension(extension)
+        self.agents = self.registry.as_dict()
+
+    def _apply_extension(self, extension):
+        self.registry.register(
+            extension.intent,
+            extension.handler,
+            internal=extension.internal,
+            replace=extension.replace,
+        )
+        if extension.keywords or extension.patterns:
+            self.router.register_rule(
+                extension.intent,
+                keywords=extension.keywords,
+                patterns=extension.patterns,
+                priority=extension.priority,
+            )
+        if extension.intent == "classify":
+            self.router.classify_agent = extension.handler
+
+    def register_agent(
+        self,
+        intent: str,
+        handler,
+        keywords=None,
+        patterns=None,
+        priority: int = 50,
+        internal: bool = False,
+        replace: bool = False,
+    ) -> None:
+        """Register a new intent handler without modifying the main agent loop."""
+        extension = AgentExtension(
+            intent=AgentRegistry._normalize_intent(intent),
+            handler=handler,
+            keywords=list(keywords or []),
+            patterns=list(patterns or []),
+            priority=priority,
+            internal=internal,
+            replace=replace,
+        )
+        if extension.intent in self._extensions and not replace:
+            raise ValueError(f"agent extension already registered: {extension.intent}")
+        self._apply_extension(extension)
+        self._extensions[extension.intent] = extension
+        self.agents = self.registry.as_dict()
+
+    def available_intents(self) -> List[str]:
+        return list(self.registry.intents())
 
     def _init_system_prompts(self):
         """初始化各 Agent 专用提示词，优先加载用户自定义文件，否则使用 Example 默认文件"""
@@ -104,25 +162,23 @@ class XianyuReplyBot:
         # 1. 三级意图分类路由决策
         detected_intent = self.router.detect(user_msg, enriched_item_desc, formatted_context)
 
-        internal_intents = {'classify'}  # 定义不对外开放的 Agent
-
         if detected_intent == 'no_reply':
             logger.info(f"意图识别完成: no_reply - 无需回复")
             self.last_intent = 'no_reply'
             self.last_trace.intent = 'no_reply'
             self.last_trace.routed_agent = 'none'
             self.last_trace.no_reply = True
+            self.last_trace.model = {"router": self.router.last_trace}
+            if self.router.last_trace.get("model", {}).get("status") == "fallback":
+                self.last_trace.guardrails.append("router_model_fallback")
             logger.info(f"[AgentTrace] {json.dumps(self.last_trace.to_dict(), ensure_ascii=False)}")
             return "-"  # 返回特殊标记，表示无需回复
 
-        elif detected_intent in self.agents and detected_intent not in internal_intents:
-            agent = self.agents[detected_intent]
-            logger.info(f"意图识别完成: 转发至 [{detected_intent}Agent]")
-            self.last_intent = detected_intent  # 保存当前意图
         else:
-            agent = self.agents['default']
-            logger.info(f"意图识别完成: 转发至 [defaultAgent]")
-            self.last_intent = 'default'  # 保存当前意图
+            registration = self.registry.resolve(detected_intent)
+            agent = registration.handler
+            self.last_intent = registration.intent
+            logger.info(f"意图识别完成: 转发至 [{registration.intent}Agent]")
 
         # 2. 获取议价次数 (从 SQLite 缓存中检索)
         bargain_count = self.db.get_bargain_count_by_chat(chat_id)
@@ -147,11 +203,18 @@ class XianyuReplyBot:
         self.last_trace.routed_agent = agent.__class__.__name__
         self.last_trace.bargain_count = bargain_count
         agent_trace = getattr(agent, "last_trace", {})
+        router_guardrails = []
+        if self.router.last_trace.get("model", {}).get("status") == "fallback":
+            router_guardrails.append("router_model_fallback")
         self.last_trace.guardrails = list(dict.fromkeys(
-            agent_trace.get("guardrails", []) + validation.guardrails + style_result.guardrails
+            router_guardrails + agent_trace.get("guardrails", []) + validation.guardrails + style_result.guardrails
         ))
         self.last_trace.price_decision = agent_trace.get("price_decision", {})
         self.last_trace.knowledge = agent_trace.get("knowledge", {})
+        self.last_trace.model = {
+            "router": self.router.last_trace,
+            "responder": agent_trace.get("model", {}),
+        }
         self.last_trace.rules.update(validation.to_dict())
         self.last_trace.style = style_result.to_dict()
         logger.info(f"[AgentTrace] {json.dumps(self.last_trace.to_dict(), ensure_ascii=False)}")
@@ -161,8 +224,19 @@ class XianyuReplyBot:
         """重新加载所有提示词"""
         logger.info("正在重新加载提示词...")
         self._init_system_prompts()
-        self._init_agents()
+        self._rebuild_agent_runtime()
         logger.info("提示词重新加载完成")
+
+
+@dataclass
+class AgentExtension:
+    intent: str
+    handler: Any
+    keywords: List[str] = field(default_factory=list)
+    patterns: List[str] = field(default_factory=list)
+    priority: int = 50
+    internal: bool = False
+    replace: bool = False
 
 
 class IntentRouter:
@@ -180,36 +254,48 @@ class IntentRouter:
                 'patterns': [r'\d+元', r'能少\d+', r'\d+(可以|行|出|卖|拍)', r'\d+.*(拍|成交|给你|要了)', r'包邮']
             }
         }
+        self.priorities = {"tech": 10, "price": 20}
         self.classify_agent = classify_agent
+        self.last_trace = {}
+
+    def register_rule(self, intent: str, keywords=None, patterns=None, priority: int = 50) -> None:
+        normalized = AgentRegistry._normalize_intent(intent)
+        compiled_patterns = list(patterns or [])
+        for pattern in compiled_patterns:
+            re.compile(pattern)
+        self.rules[normalized] = {
+            "keywords": list(keywords or []),
+            "patterns": compiled_patterns,
+        }
+        self.priorities[normalized] = int(priority)
 
     def detect(self, user_msg: str, item_desc, context) -> str:
         """三级路由策略"""
         text_clean = re.sub(r'[^\w\u4e00-\u9fa5]', '', user_msg)
 
-        # 1. 技术类关键词优先检查
-        if any(kw in text_clean for kw in self.rules['tech']['keywords']):
-            return 'tech'
-
-        # 2. 技术类正则优先检查
-        for pattern in self.rules['tech']['patterns']:
-            if re.search(pattern, text_clean):
-                return 'tech'
-
-        # 3. 价格类检查
-        for intent in ['price']:
+        # Deterministic rules run in explicit priority order before LLM routing.
+        for intent in sorted(self.rules, key=lambda name: self.priorities.get(name, 50)):
             if any(kw in text_clean for kw in self.rules[intent]['keywords']):
+                self.last_trace = {"source": "rule", "intent": intent}
                 return intent
             for pattern in self.rules[intent]['patterns']:
                 if re.search(pattern, text_clean):
+                    self.last_trace = {"source": "rule", "intent": intent}
                     return intent
 
-        # 4. 规则无法匹配时，由大模型分类 Agent 进行兜底
+        # Rules cannot classify this turn, so ask the classifier agent.
         logger.debug("规则无法精确匹配意图，交由大模型分类 Agent 决策...")
-        return self.classify_agent.generate(
+        intent = self.classify_agent.generate(
             user_msg=user_msg,
             item_desc=item_desc,
             context=context
         )
+        self.last_trace = {
+            "source": "classifier",
+            "intent": intent,
+            "model": getattr(self.classify_agent, "last_trace", {}).get("model", {}),
+        }
+        return intent
 
 
 class BaseAgent:
@@ -223,9 +309,16 @@ class BaseAgent:
 
     def generate(self, user_msg: str, item_desc: str, context: str, bargain_count: int = 0, chat_id: str = None) -> str:
         """生成回复的模板方法"""
+        self.last_trace = {}
         messages = self._build_messages(user_msg, item_desc, context)
-        response = self._call_llm(messages)
+        response = self._call_llm_with_fallback(
+            messages,
+            fallback_text=self._fallback_reply(user_msg, item_desc, context),
+        )
         return self.safety_filter(response)
+
+    def _fallback_reply(self, user_msg: str, item_desc: str, context: str) -> str:
+        return "在的，你具体想问商品哪方面？我按商品信息跟你说。"
 
     def _build_messages(self, user_msg: str, item_desc: str, context: str) -> List[Dict]:
         """构建标准消息链路"""
@@ -243,7 +336,31 @@ class BaseAgent:
             max_tokens=500,
             top_p=0.8
         )
-        return response.choices[0].message.content
+        content = response.choices[0].message.content
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("model returned empty content")
+        return content.strip()
+
+    def _call_llm_with_fallback(
+        self,
+        messages: List[Dict],
+        fallback_text: str,
+        temperature: float = 0.4,
+    ) -> str:
+        try:
+            response = self._call_llm(messages, temperature=temperature)
+            self.last_trace["model"] = {"status": "ok"}
+            return response
+        except Exception as exc:
+            logger.error(f"模型调用失败，使用确定性安全回复: error_type={type(exc).__name__}")
+            guardrails = self.last_trace.setdefault("guardrails", [])
+            if "model_fallback" not in guardrails:
+                guardrails.append("model_fallback")
+            self.last_trace["model"] = {
+                "status": "fallback",
+                "error_type": type(exc).__name__,
+            }
+            return fallback_text
 
 
 class PriceAgent(BaseAgent):
@@ -307,7 +424,11 @@ class PriceAgent(BaseAgent):
         messages[0]['content'] += f"\n▲当前议价轮次：{bargain_count}"
 
         dynamic_temp = self._calc_temperature(bargain_count)
-        response_text = self._call_llm(messages, temperature=dynamic_temp)
+        response_text = self._call_llm_with_fallback(
+            messages,
+            fallback_text=f"这个价我算过了，最低 {calculated_price} 元，可以的话直接拍。",
+            temperature=dynamic_temp,
+        )
         return self.safety_filter(response_text)
 
     @staticmethod
@@ -409,13 +530,16 @@ class TechAgent(BaseAgent):
     引入 RAG FAQ 思想，从本地商品知识库提取精准的规格参数并动态注入提示词，防止 LLM 满口跑火车。
     """
     def generate(self, user_msg: str, item_desc: str, context: str, bargain_count: int = 0, chat_id: str = None) -> str:
-        # 1. 尝试加载本地的商品知识库库 product_info.json
-        product_info = {}
+        # The current item context is authoritative. The local JSON is only a
+        # demo fallback for callers that did not provide structured item data.
+        product_info = PriceAgent._extract_json_payload(item_desc)
         info_path = "data/product_info.json"
-        if os.path.exists(info_path):
+        knowledge_source = "item_context" if product_info else None
+        if not product_info and os.path.exists(info_path):
             try:
                 with open(info_path, "r", encoding="utf-8") as f:
                     product_info = json.load(f)
+                knowledge_source = info_path
             except Exception as e:
                 logger.warning(f"读取本地商品知识库失败: {e}")
 
@@ -432,7 +556,7 @@ class TechAgent(BaseAgent):
         self.last_trace = {
             "guardrails": ["truthful_product_facts"] if kb_context else [],
             "knowledge": {
-                "source": info_path if product_info else None,
+                "source": knowledge_source,
                 "matched": bool(kb_context),
                 "context": kb_context,
             },
@@ -449,7 +573,16 @@ class TechAgent(BaseAgent):
             )
             messages[0]['content'] += rag_instruction
 
-        response_text = self._call_llm(messages, temperature=0.3)
+        fallback_text = (
+            f"商品信息里写的是：{kb_context}"
+            if kb_context
+            else "这个细节商品信息里没写清楚，我不能乱说，确认后再回复你。"
+        )
+        response_text = self._call_llm_with_fallback(
+            messages,
+            fallback_text=fallback_text,
+            temperature=0.3,
+        )
         return self.safety_filter(response_text)
 
 
@@ -459,10 +592,13 @@ class ClassifyAgent(BaseAgent):
         response = super().generate(**args)
         return response.strip().lower()
 
+    def _fallback_reply(self, user_msg: str, item_desc: str, context: str) -> str:
+        return "default"
+
 
 class DefaultAgent(BaseAgent):
     """默认处理 Agent (提供高情商闲聊回复并兜底)"""
-    def _call_llm(self, messages: List[Dict], *args) -> str:
+    def _call_llm(self, messages: List[Dict], *args, **kwargs) -> str:
         # 闲聊时提高温度以展现更多灵活性
         response = super()._call_llm(messages, temperature=0.7)
         return response

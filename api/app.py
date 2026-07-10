@@ -92,7 +92,7 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(
         title="Falses Goofish GuardAgent API",
-        version="0.2.0",
+        version="0.3.0",
         description="Service API for local-first Xianyu / Goofish AI customer-service agent.",
     )
     use_offline_client = _is_offline_mode() if offline_mode is None else offline_mode
@@ -109,6 +109,15 @@ def create_app(
     @app.get("/health")
     def health() -> Dict[str, Any]:
         return {"status": "ok", "offline_mode": app.state.offline_mode}
+
+    @app.get("/api/capabilities")
+    def capabilities() -> Dict[str, Any]:
+        bot: XianyuReplyBot = app.state.bot
+        return {
+            "intents": bot.available_intents(),
+            "offline_mode": app.state.offline_mode,
+            "extension_contract": "register_agent",
+        }
 
     @app.post("/api/reply", response_model=ReplyResponse)
     def reply(request: ReplyRequest) -> ReplyResponse:

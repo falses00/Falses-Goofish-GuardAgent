@@ -102,6 +102,7 @@ uvicorn api.app:app --host 127.0.0.1 --port 8000
 核心接口：
 
 - `GET /health`：健康检查，并返回是否处于离线 deterministic LLM 模式。
+- `GET /api/capabilities`：列出当前已注册的业务意图，便于管理台或 MCP 动态发现能力。
 - `POST /api/reply`：输入买家消息、商品信息和会话 ID，返回回复、意图、trace 和 memory snapshot。
 - `GET /api/traces?limit=20`：读取最近的 JSONL trace，便于排查和回放。
 
@@ -165,16 +166,35 @@ curl -X POST http://127.0.0.1:8000/api/reply ^
 
 这里采用的是“持久化 Outbox + at-least-once 重试 + 进程内并发幂等”。闲鱼 WebSocket 发送接口没有暴露业务幂等键，因此如果消息已经到达平台、进程却在 `mark_sent` 前崩溃，恢复重试仍存在极小的重复发送窗口。生产上需要平台 ACK/幂等键或人工审计来进一步收敛，项目不会把这一点包装成不存在的 exactly-once 保证。
 
+### 12. 可扩展 Agent 注册表与模型降级
+
+新增业务 Agent 不需要修改 `generate_reply()` 主循环，只需实现统一的 `generate(**kwargs)` 契约并注册：
+
+```python
+shipping_agent = ShippingAgent()
+bot.register_agent(
+    "shipping",
+    shipping_agent,
+    keywords=["多久发货", "什么时候发"],
+    priority=5,
+)
+```
+
+注册信息会在 Prompt 热重载后保留，`GET /api/capabilities` 可发现新增意图。模型超时、空响应或调用异常时，Agent 不会让整条 WebSocket 消息处理链崩溃：默认咨询返回谨慎话术，详情咨询只引用当前商品上下文，议价回复继续使用 `BargainExpert` 算出的安全价格；`AgentTrace.model.router / responder` 会分别记录路由来源、`ok / fallback` 和错误类型。
+
+`TechAgent` 现在严格以当前 `item_id` 对应的消息商品上下文为事实源，只有调用方没有提供结构化商品数据时才读取演示 JSON，防止不同商品之间串用 iPad 等示例参数。
+
 ## 项目结构
 
 ```text
 Falses-Goofish-GuardAgent/
-├── main.py                     # 启动入口：xianyu / cli / smoke / replay
+├── main.py                     # 启动入口：xianyu / cli / smoke / replay / doctor
 ├── XianyuAgent.py              # 意图路由、价格 Agent、详情 Agent、默认 Agent
 ├── XianyuApis.py               # 闲鱼 / Goofish API 与 WebSocket 封装
 ├── context_manager.py          # SQLite 会话历史、议价次数、价格承诺记忆
 ├── core/
 │   ├── __init__.py
+│   ├── agent_registry.py       # 可插拔 Agent 注册、解析与回退契约
 │   ├── experts.py              # BargainExpert 与 FAQExpert
 │   ├── human_style.py          # 真人卖家回复风格约束与机器腔清洗
 │   ├── message_aggregation.py  # 连续买家消息 debounce 聚合
@@ -182,6 +202,7 @@ Falses-Goofish-GuardAgent/
 │   ├── observability.py        # AgentTrace 可观测结构
 │   ├── product_rules.py        # 商品规则中心与交付决策
 │   ├── reply_outbox.py         # 自动回复执行 Outbox 与重复发送防护
+│   ├── runtime_config.py       # 无密钥泄露的启动就绪诊断
 │   ├── evaluation.py           # 离线 LLM stub 与 Agent 评测 harness
 │   └── trace_store.py          # JSONL trace 持久化与回放
 ├── api/
@@ -200,6 +221,7 @@ Falses-Goofish-GuardAgent/
 ├── prompts/                    # 提示词模板，正式提示词默认不入库
 ├── tests/
 │   ├── test_agents.py          # 核心策略单元测试
+│   ├── test_agent_runtime.py   # 扩展注册、模型降级与配置诊断测试
 │   ├── test_message_aggregation.py # 消息聚合状态机测试
 │   ├── test_product_rules.py   # 规则中心与交付决策测试
 │   ├── test_human_style.py     # 真人化回复风格测试
@@ -306,14 +328,30 @@ COOKIES_STR=your_cookies_here
 然后启动：
 
 ```bash
+python main.py --mode doctor
 python main.py --mode xianyu
 ```
+
+`doctor` 不调用外部网络，也不会打印密钥；它会检查模型配置、Cookie 中的 `unb`、提示词以及商品规则/风格配置。容器中默认 `NON_INTERACTIVE=true`，配置不完整时直接退出并报告缺失项，不会无限等待终端输入。
+
+运行中若 Cookie 失效或触发滑块风控，API 层会抛出明确的认证异常。交互终端仍可现场更新 Cookie；非交互容器会停止连接和 token 刷新并退出，避免在风控状态下无限递归请求。
+
+### 6. Docker 部署
+
+```bash
+docker compose build
+docker compose up -d
+docker compose ps
+```
+
+Compose 现在构建当前仓库的 `Dockerfile`，镜像包含 `core/`、`api/`、提示词和 JSON 规则，不再拉取上游 `shaxiu/xianyuautoagent:latest`。健康检查使用 `doctor` 验证容器配置；首次部署可先从 `.env.example` 创建自己的 `.env`。
 
 ## 自动化测试
 
 ```bash
-pytest tests/test_agents.py tests/test_message_aggregation.py tests/test_product_rules.py tests/test_human_style.py tests/test_reply_outbox.py tests/test_api.py -q
+pytest tests/test_agents.py tests/test_agent_runtime.py tests/test_message_aggregation.py tests/test_product_rules.py tests/test_human_style.py tests/test_reply_outbox.py tests/test_live_reply_execution.py tests/test_api.py -q
 python main.py --mode smoke
+python main.py --mode replay
 python tools/run_agent_eval.py --min-score 1.0
 ```
 
@@ -336,6 +374,10 @@ python tools/run_agent_eval.py --min-score 1.0
 - 空消息等非法输入返回 422，避免脏请求进入 Agent 决策链路。
 - 离线 Agent 评测集，覆盖意图路由、RAG 命中、护栏触发、价格决策和最终记忆状态。
 - 商品知识库关键词命中。
+- 当前商品事实优先，禁止跨商品串用演示知识库。
+- 动态 Agent 注册、优先级路由与 Prompt 重载保留。
+- 模型超时/空响应时的安全降级，以及价格护栏不失效。
+- `doctor` 配置诊断和 Docker Compose 语法/镜像构建门禁。
 
 ## Agent 评测体系
 
@@ -345,7 +387,7 @@ python tools/run_agent_eval.py --min-score 1.0
 - `core/evaluation.py`：确定性 LLM stub + trace-aware 断言。
 - `tools/run_agent_eval.py`：输出 JSON / Markdown 评测报告。
 - `api/app.py`：服务化接口复用同一套 Agent core，方便外部系统集成和自动化验证。
-- `.github/workflows/ci.yml`：CI 自动跑单测、编译、runtime smoke 和 agent eval gate。
+- `.github/workflows/ci.yml`：CI 自动跑单测、编译、doctor、runtime smoke、agent eval gate 和当前仓库镜像构建。
 
 评测会检查 `intent`、`routed_agent`、`guardrails`、`knowledge.matched`、`price_decision.action`、`buyer_offer`、`calculated_price`、`bargain_count`、`lowest_price_committed` 和 `buyer_highest_offer`，避免项目退化成只看最终回复的 demo。
 
@@ -367,6 +409,7 @@ python tools/run_agent_eval.py --min-score 1.0
 | `MODEL_BASE_URL` | 通用模型 API base URL，兼容旧配置 |
 | `MODEL_NAME` | 通用模型名称，兼容旧配置 |
 | `COOKIES_STR` | 闲鱼 / Goofish 网页端 Cookie，仅 xianyu 模式需要 |
+| `NON_INTERACTIVE` | 非交互启动开关；容器中为 `true`，配置缺失时 fail-fast |
 | `DEFAULT_DISCOUNT_LIMIT` | 最低折扣比例，例如 `0.85` 表示最多降到 8.5 折 |
 | `PRODUCT_RULES_PATH` | 商品规则中心路径，默认 `data/product_rules.json` |
 | `HUMAN_REPLY_STYLE_PATH` | 真人卖家回复风格配置路径，默认 `data/human_reply_style.json` |

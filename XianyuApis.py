@@ -8,6 +8,14 @@ from loguru import logger
 from utils.xianyu_utils import generate_sign
 
 
+class XianyuAuthenticationError(RuntimeError):
+    """Cookie or login state cannot authenticate the Xianyu session."""
+
+
+class XianyuRiskControlError(XianyuAuthenticationError):
+    """Xianyu requires an interactive risk-control challenge."""
+
+
 class XianyuApis:
     def __init__(self):
         self.url = 'https://h5api.m.goofish.com/h5/mtop.taobao.idlemessage.pc.login.token/1.0/'
@@ -147,7 +155,7 @@ class XianyuApis:
             else:
                 logger.error("重新登录失败，Cookie已失效")
                 logger.error("🔴 程序即将退出，请更新.env文件中的COOKIES_STR后重新启动")
-                sys.exit(1)  # 直接退出程序
+                raise XianyuAuthenticationError("Cookie 已失效，重新登录失败")
 
         params = {
             'jsv': '2.7.2',
@@ -205,7 +213,11 @@ class XianyuApis:
                         logger.error(f"❌ 触发风控: {ret_value}")
                         logger.error("🔴 系统目前无法自动解决，请进入闲鱼网页版-点击消息-过滑块-复制最新的Cookie")
                         
-                        # 获取用户输入的新Cookie
+                        non_interactive = os.getenv("NON_INTERACTIVE", "false").lower() in {"1", "true", "yes", "on"}
+                        if non_interactive or not sys.stdin.isatty():
+                            raise XianyuRiskControlError("触发闲鱼风控，需要在浏览器完成验证并更新 Cookie")
+
+                        # 交互终端允许现场更新 Cookie；容器模式会在上方快速失败。
                         print("\n" + "="*50)
                         new_cookie_str = input("请输入新的Cookie字符串 (复制浏览器中的完整cookie，直接回车则退出程序): ").strip()
                         print("="*50 + "\n")
@@ -230,10 +242,10 @@ class XianyuApis:
                                 return self.get_token(device_id, 0)
                             except Exception as e:
                                 logger.error(f"Cookie解析失败: {e}")
-                                sys.exit(1)
+                                raise XianyuAuthenticationError("Cookie 解析失败") from e
                         else:
                             logger.info("用户取消输入，程序退出")
-                            sys.exit(1)
+                            raise XianyuAuthenticationError("用户取消更新 Cookie")
 
                     logger.warning(f"Token API调用失败，错误信息: {ret_value}")
                     # 处理响应中的Set-Cookie
@@ -249,6 +261,8 @@ class XianyuApis:
                 logger.error(f"Token API返回格式异常: {res_json}")
                 return self.get_token(device_id, retry_count + 1)
                 
+        except XianyuAuthenticationError:
+            raise
         except Exception as e:
             logger.error(f"Token API请求异常: {str(e)}")
             time.sleep(0.5)

@@ -32,6 +32,8 @@ The project already had routing, SQLite memory, trace logging, smoke mode, deter
 
 - `api/app.py`: FastAPI service wrapper around the same `XianyuReplyBot` core with typed request / response models.
 - `core/message_aggregation.py`: input-boundary debounce layer that turns bursty platform events into one stable user turn before routing.
+- `core/agent_registry.py`: extensible intent-to-handler registry with explicit fallback and runtime capability discovery.
+- `core/runtime_config.py`: secret-free startup readiness checks for model credentials, Xianyu identity, prompts, and policy files.
 - `core/product_rules.py`: structured product rule center for allowed promises, forbidden promises, refund boundaries, and auditable delivery decisions.
 - `core/human_style.py`: configurable human-seller style guardrail that detects and rewrites robotic customer-service tone before replies reach buyers.
 - `core/reply_outbox.py`: durable reply execution outbox with source-message dedupe, send claiming, sent/failed/skipped states, and retry semantics.
@@ -41,10 +43,11 @@ The project already had routing, SQLite memory, trace logging, smoke mode, deter
 - `tests/test_human_style.py`: adversarial tone test proving robotic LLM output is rewritten before being returned.
 - `tests/test_reply_outbox.py`: execution tests for duplicate-send blocking and retry after failure.
 - `tests/test_api.py`: API tests for health, tech routing, price guardrails, trace lookup, memory persistence, batched user input, and invalid request rejection.
+- `tests/test_agent_runtime.py`: extension registration, prompt-reload persistence, model-outage fallback, cross-product fact isolation, and readiness diagnostics.
 - `evals/agent_eval_cases.json`: curated golden scenarios covering product facts, lowball negotiation, serious offers, commitment consistency, and fallback chat.
 - `core/evaluation.py`: deterministic offline evaluation harness with trace-aware assertions.
 - `tools/run_agent_eval.py`: CLI runner that emits JSON and Markdown eval reports.
-- `.github/workflows/ci.yml`: CI gate for unit tests, API tests, compile checks, runtime smoke, and agent eval pass rate.
+- `.github/workflows/ci.yml`: CI gate for unit tests, API tests, compile checks, readiness diagnostics, runtime smoke, agent eval pass rate, and Docker image build.
 
 ## How To Demo In An Interview
 

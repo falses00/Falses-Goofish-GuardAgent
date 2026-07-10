@@ -1,3 +1,4 @@
+import json
 from typing import Dict, Any, Optional
 
 
@@ -115,31 +116,41 @@ class FAQExpert:
         """
         matched = []
         user_msg_lower = user_msg.lower()
+        generic_description = str(self.product_info.get("desc") or "").strip()
+
+        def append_fact(label: str, *values: Any) -> None:
+            facts = [str(value).strip() for value in values if value not in (None, "")]
+            if facts:
+                matched.append(f"【{label}】: {' | '.join(facts)}")
+            elif generic_description:
+                matched.append(f"【商品描述】: {generic_description}")
 
         # 简单成色/外观匹配
         if any(kw in user_msg_lower for kw in ["成色", "划痕", "磕碰", "磨损", "几成新"]):
-            matched.append(f"【外观与成色】: {self.product_info.get('condition', {}).get('screen', '')}。{self.product_info.get('condition', {}).get('body', '')}")
+            condition = self.product_info.get("condition", {})
+            append_fact("外观与成色", condition.get("screen"), condition.get("body"))
 
         # 配件匹配
         if any(kw in user_msg_lower for kw in ["配件", "充电器", "线", "盒", "送", "包装"]):
             acc = self.product_info.get("accessories", {})
-            matched.append(f"【随附配件】: 充电器: {acc.get('charger')} | 线: {acc.get('cable')} | 包装盒: {acc.get('box')} | 赠品: {acc.get('gifts')}")
+            append_fact("随附配件", acc.get("charger"), acc.get("cable"), acc.get("box"), acc.get("gifts"))
 
         # 拆修匹配
         if any(kw in user_msg_lower for kw in ["拆", "修", "换过", "屏幕坏", "绿"]):
-            matched.append(f"【拆修情况】: {self.product_info.get('condition', {}).get('repair', '')}")
+            append_fact("拆修情况", self.product_info.get("condition", {}).get("repair"))
 
         # 快递/发货匹配
         if any(kw in user_msg_lower for kw in ["快递", "发什么", "包邮", "邮费", "发货", "哪里发"]):
-            matched.append(f"【发货与物流】: 快递规则: {self.product_info.get('shipping_fee')} | 快递: {self.product_info.get('shipping', {}).get('courier')} | 发货地: {self.product_info.get('shipping', {}).get('origin')}")
+            shipping = self.product_info.get("shipping", {})
+            append_fact("发货与物流", self.product_info.get("shipping_fee"), shipping.get("courier"), shipping.get("origin"))
 
         # 面交匹配
         if any(kw in user_msg_lower for kw in ["面交", "当面", "自提"]):
-            matched.append(f"【面交与线下自提】: {self.product_info.get('faq', {}).get('face_to_face_trade')}")
+            append_fact("面交与线下自提", self.product_info.get("faq", {}).get("face_to_face_trade"))
 
         # 换机原因匹配
         if any(kw in user_msg_lower for kw in ["为什么卖", "换机", "出"]):
-            matched.append(f"【转让原因】: {self.product_info.get('faq', {}).get('reason_for_selling')}")
+            append_fact("转让原因", self.product_info.get("faq", {}).get("reason_for_selling"))
 
         if not matched:
             return ""
