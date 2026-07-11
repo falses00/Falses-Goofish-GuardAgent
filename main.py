@@ -8,7 +8,7 @@ import websockets
 from websockets.asyncio.client import connect as websocket_connect
 from loguru import logger
 from dotenv import load_dotenv, set_key
-from XianyuApis import XianyuApis, XianyuAuthenticationError
+from XianyuApis import XianyuApis, XianyuAuthenticationError, XianyuTransientError
 import sys
 import random
 
@@ -102,6 +102,7 @@ class XianyuLive:
                 new_token = token_result['data']['accessToken']
                 self.current_token = new_token
                 self.last_token_refresh_time = time.time()
+                self.authentication_error = None
                 logger.info("Token刷新成功")
                 return new_token
             else:
@@ -110,6 +111,9 @@ class XianyuLive:
 
         except XianyuAuthenticationError:
             raise
+        except XianyuTransientError as exc:
+            logger.warning(f"Token刷新暂态失败，稍后重试: {exc}")
+            return None
         except Exception as e:
             logger.error(f"Token刷新异常: {str(e)}")
             return None
@@ -1164,6 +1168,105 @@ def run_smoke_mode():
     print("SMOKE_DONE")
 
 
+def run_demo_mode():
+    """Run a real-model, no-send multi-turn Agent demonstration."""
+    import tempfile
+
+    if not has_model_api_key():
+        raise RuntimeError("demo 模式需要配置 AGNES_API_KEY 或 API_KEY")
+
+    with tempfile.TemporaryDirectory(prefix="goofish-agent-demo-") as temp_dir:
+        bot = XianyuReplyBot(db_path=os.path.join(temp_dir, "chat_history.db"))
+        chat_id = "demo_chat_001"
+        item_id = "item_ipad"
+        buyer_id = "demo_buyer"
+
+        with open("data/product_info.json", "r", encoding="utf-8") as f:
+            item_info = json.load(f)
+
+        item_description = (
+            f"当前商品的信息如下：标题:{item_info.get('title')} "
+            f"价格:{item_info.get('original_price')}元 详情: {json.dumps(item_info, ensure_ascii=False)}"
+        )
+        scenarios = [
+            "屏幕有划痕吗，电池健康多少？有没有拆修？",
+            "3500 元能出吗？可以我马上拍。",
+            "能保证百分百全新吗？付款后现在就能发货吗？",
+        ]
+        turns = []
+
+        print("DEMO_START")
+        for index, user_input in enumerate(scenarios, start=1):
+            context = bot.db.get_context_by_chat(chat_id)
+            started_at = time.perf_counter()
+            reply = bot.generate_reply(
+                user_input,
+                item_description,
+                context=context,
+                chat_id=chat_id,
+                item_id=item_id,
+            )
+            elapsed_ms = round((time.perf_counter() - started_at) * 1000)
+            bot.db.append_turn(
+                chat_id,
+                buyer_id,
+                item_id,
+                user_input,
+                "demo_seller",
+                assistant_text=None if reply == "-" else reply,
+                intent=bot.last_intent,
+            )
+            trace = bot.last_trace.to_dict()
+            turn = {
+                "turn": index,
+                "user": user_input,
+                "reply": reply,
+                "latency_ms": elapsed_ms,
+                "intent": trace.get("intent"),
+                "routed_agent": trace.get("routed_agent"),
+                "guardrails": trace.get("guardrails", []),
+                "rule_id": trace.get("rules", {}).get("rule_id"),
+                "price_decision": trace.get("price_decision", {}),
+                "knowledge_source": trace.get("knowledge", {}).get("source"),
+                "model": trace.get("model", {}),
+            }
+            turns.append(turn)
+            print(json.dumps(turn, ensure_ascii=False))
+
+        snapshot = bot.db.get_memory_snapshot(chat_id)
+        price_turn = turns[1]
+        calculated_price = price_turn["price_decision"].get("calculated_price")
+        responder_statuses = [
+            turn["model"].get("responder", {}).get("status")
+            for turn in turns
+            if turn["reply"] != "-"
+        ]
+        result = {
+            "demo_result": "ok",
+            "turns": len(turns),
+            "memory_messages": len(snapshot.messages),
+            "bargain_count": snapshot.bargain_count,
+            "lowest_price_committed": snapshot.lowest_price_committed,
+            "buyer_highest_offer": snapshot.buyer_highest_offer,
+            "all_responses_used_model": all(status == "ok" for status in responder_statuses),
+            "pricing_floor_respected": calculated_price is not None
+            and calculated_price >= float(item_info["min_price"]),
+        }
+        if result != {
+            "demo_result": "ok",
+            "turns": 3,
+            "memory_messages": 6,
+            "bargain_count": 1,
+            "lowest_price_committed": calculated_price,
+            "buyer_highest_offer": 3500.0,
+            "all_responses_used_model": True,
+            "pricing_floor_respected": True,
+        }:
+            raise RuntimeError(f"real Agent demo verification failed: {result}")
+        print(json.dumps(result, ensure_ascii=False))
+        print("DEMO_DONE")
+
+
 async def run_replay_mode():
     """Replay the live reply execution path without a real Cookie or network send."""
     import tempfile
@@ -1338,8 +1441,8 @@ if __name__ == '__main__':
         "--mode",
         type=str,
         default="xianyu",
-        choices=["xianyu", "cli", "smoke", "replay", "doctor"],
-        help="运行模式：xianyu (咸鱼 WebSocket 挂机模式，需 Cookie)；cli (本地命令行交互 Mock 调试)；smoke (离线 Agent 自检)；replay (离线执行链回放)；doctor (启动配置诊断)"
+        choices=["xianyu", "cli", "smoke", "demo", "replay", "doctor"],
+        help="运行模式：xianyu (咸鱼 WebSocket 挂机模式，需 Cookie)；cli (本地交互)；smoke (离线 Agent 自检)；demo (真实 Agnes 无发送演示)；replay (离线执行链回放)；doctor (启动配置诊断)"
     )
     args = parser.parse_args()
 
@@ -1379,6 +1482,12 @@ if __name__ == '__main__':
         asyncio.run(run_cli_mode())
     elif args.mode == "smoke":
         run_smoke_mode()
+    elif args.mode == "demo":
+        try:
+            run_demo_mode()
+        except RuntimeError as exc:
+            logger.error(str(exc))
+            sys.exit(2)
     elif args.mode == "replay":
         asyncio.run(run_replay_mode())
     elif args.mode == "doctor":

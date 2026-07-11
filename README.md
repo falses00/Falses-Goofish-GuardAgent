@@ -80,6 +80,14 @@ python main.py --mode replay
 
 `replay` 会让一条买家消息真实穿过商品上下文、Agent、SQLite 记忆和 Reply Outbox，再重复投递同一个源事件。它固定启用 dry-run，并断言只生成一轮记忆、只领取一次发送权且网络发送次数为 0。
 
+使用真实 Agnes 模型做一轮无发送、多轮交易演示：
+
+```bash
+python main.py --mode demo
+```
+
+`demo` 使用隔离临时数据库依次运行商品疑虑、低价砍价和高风险承诺场景，输出延迟、路由 Agent、价格决策、知识来源、护栏和模型状态。它不连接闲鱼发送接口，但要求真实模型调用成功、议价不突破商品底价、记忆状态与三轮对话一致，否则以非零状态退出。
+
 ### 6. AgentTrace 可观测链路
 
 每轮回复都会生成 `AgentTrace`，记录：
@@ -188,7 +196,7 @@ bot.register_agent(
 
 ```text
 Falses-Goofish-GuardAgent/
-├── main.py                     # 启动入口：xianyu / cli / smoke / replay / doctor
+├── main.py                     # 启动入口：xianyu / cli / smoke / demo / replay / doctor
 ├── XianyuAgent.py              # 意图路由、价格 Agent、详情 Agent、默认 Agent
 ├── XianyuApis.py               # 闲鱼 / Goofish API 与 WebSocket 封装
 ├── context_manager.py          # SQLite 会话历史、议价次数、价格承诺记忆
@@ -308,7 +316,15 @@ python main.py --mode replay
 
 `replay` 不需要 Cookie 或外部 LLM API，但会调用与闲鱼挂机模式相同的 `_process_buyer_message -> ReplyOutbox -> send` 执行链。它验证 dry-run 零网络发送、同一事件重复投递不重复生成回复，并输出 Outbox 状态、领取次数和记忆条数。
 
-### 4.3 启动 Agent API
+### 4.3 真实 Agnes 多轮演示
+
+```bash
+python main.py --mode demo
+```
+
+`demo` 会真实调用 Agnes，但使用隔离临时会话且不连接闲鱼发送接口。它依次验证商品事实问答、低于底价的砍价和高风险承诺场景，并断言模型调用成功、价格底线未突破、SQLite 多轮记忆一致。
+
+### 4.4 启动 Agent API
 
 ```bash
 $env:API_OFFLINE_MODE="true"
@@ -334,7 +350,7 @@ python main.py --mode xianyu
 
 `doctor` 不调用外部网络，也不会打印密钥；它会检查模型配置、Cookie 中的 `unb`、提示词以及商品规则/风格配置。容器中默认 `NON_INTERACTIVE=true`，配置不完整时直接退出并报告缺失项，不会无限等待终端输入。
 
-运行中若 Cookie 失效或触发滑块风控，API 层会抛出明确的认证异常。交互终端仍可现场更新 Cookie；非交互容器会停止连接和 token 刷新并退出，避免在风控状态下无限递归请求。
+运行中若 Cookie 失效或触发滑块风控，API 层会抛出明确的认证异常。DNS、连接超时等暂态故障会进入有限重试和延迟恢复，不会被误判为 Cookie 失效；成功刷新 Token 后会清理陈旧认证错误。交互终端仍可现场更新 Cookie，非交互容器遇到确定的认证失败时停止连接，避免在风控状态下无限递归请求。
 
 ### 6. Docker 部署
 

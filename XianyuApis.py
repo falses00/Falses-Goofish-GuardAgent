@@ -12,6 +12,10 @@ class XianyuAuthenticationError(RuntimeError):
     """Cookie or login state cannot authenticate the Xianyu session."""
 
 
+class XianyuTransientError(RuntimeError):
+    """A temporary network or upstream failure that should be retried later."""
+
+
 class XianyuRiskControlError(XianyuAuthenticationError):
     """Xianyu requires an interactive risk-control challenge."""
 
@@ -19,6 +23,10 @@ class XianyuRiskControlError(XianyuAuthenticationError):
 class XianyuApis:
     def __init__(self):
         self.url = 'https://h5api.m.goofish.com/h5/mtop.taobao.idlemessage.pc.login.token/1.0/'
+        self.request_timeout_seconds = float(os.getenv("XIANYU_HTTP_TIMEOUT_SECONDS", "20"))
+        self.retry_delay_seconds = float(os.getenv("XIANYU_HTTP_RETRY_DELAY_SECONDS", "0.5"))
+        self.login_check_max_attempts = max(1, int(os.getenv("XIANYU_LOGIN_CHECK_MAX_ATTEMPTS", "2")))
+        self.token_request_max_attempts = max(1, int(os.getenv("XIANYU_TOKEN_MAX_ATTEMPTS", "2")))
         self.session = requests.Session()
         self.session.headers.update({
             'accept': 'application/json',
@@ -96,62 +104,73 @@ class XianyuApis:
         
     def hasLogin(self, retry_count=0):
         """调用hasLogin.do接口进行登录状态检查"""
-        if retry_count >= 2:
-            logger.error("Login检查失败，重试次数过多")
-            return False
-            
-        try:
-            url = 'https://passport.goofish.com/newlogin/hasLogin.do'
-            params = {
-                'appName': 'xianyu',
-                'fromSite': '77'
-            }
-            data = {
-                'hid': self.session.cookies.get('unb', ''),
-                'ltl': 'true',
-                'appName': 'xianyu',
-                'appEntrance': 'web',
-                '_csrf_token': self.session.cookies.get('XSRF-TOKEN', ''),
-                'umidToken': '',
-                'hsiz': self.session.cookies.get('cookie2', ''),
-                'bizParams': 'taobaoBizLoginFrom=web',
-                'mainPage': 'false',
-                'isMobile': 'false',
-                'lang': 'zh_CN',
-                'returnUrl': '',
-                'fromSite': '77',
-                'isIframe': 'true',
-                'documentReferer': 'https://www.goofish.com/',
-                'defaultView': 'hasLogin',
-                'umidTag': 'SERVER',
-                'deviceId': self.session.cookies.get('cna', '')
-            }
-            
-            response = self.session.post(url, params=params, data=data)
-            res_json = response.json()
-            
-            if res_json.get('content', {}).get('success'):
-                logger.debug("Login成功")
-                # 清理和更新cookies
-                self.clear_duplicate_cookies()
-                return True
-            else:
-                logger.warning(f"Login失败: {res_json}")
-                time.sleep(0.5)
-                return self.hasLogin(retry_count + 1)
-                
-        except Exception as e:
-            logger.error(f"Login请求异常: {str(e)}")
-            time.sleep(0.5)
-            return self.hasLogin(retry_count + 1)
+        last_error = None
+        for attempt in range(max(0, retry_count), self.login_check_max_attempts):
+            try:
+                url = 'https://passport.goofish.com/newlogin/hasLogin.do'
+                params = {
+                    'appName': 'xianyu',
+                    'fromSite': '77'
+                }
+                data = {
+                    'hid': self.session.cookies.get('unb', ''),
+                    'ltl': 'true',
+                    'appName': 'xianyu',
+                    'appEntrance': 'web',
+                    '_csrf_token': self.session.cookies.get('XSRF-TOKEN', ''),
+                    'umidToken': '',
+                    'hsiz': self.session.cookies.get('cookie2', ''),
+                    'bizParams': 'taobaoBizLoginFrom=web',
+                    'mainPage': 'false',
+                    'isMobile': 'false',
+                    'lang': 'zh_CN',
+                    'returnUrl': '',
+                    'fromSite': '77',
+                    'isIframe': 'true',
+                    'documentReferer': 'https://www.goofish.com/',
+                    'defaultView': 'hasLogin',
+                    'umidTag': 'SERVER',
+                    'deviceId': self.session.cookies.get('cna', '')
+                }
 
-    def get_token(self, device_id, retry_count=0):
-        if retry_count >= 2:  # 最多重试3次
+                response = self.session.post(
+                    url,
+                    params=params,
+                    data=data,
+                    timeout=self.request_timeout_seconds,
+                )
+                res_json = response.json()
+
+                if res_json.get('content', {}).get('success'):
+                    logger.debug("Login成功")
+                    self.clear_duplicate_cookies()
+                    return True
+
+                logger.warning(f"Login失败: {res_json}")
+                return False
+            except (requests.RequestException, ValueError) as exc:
+                last_error = exc
+                logger.warning(
+                    "Login检查暂态失败 ({}/{}): {}",
+                    attempt + 1,
+                    self.login_check_max_attempts,
+                    type(exc).__name__,
+                )
+                if attempt + 1 < self.login_check_max_attempts:
+                    time.sleep(self.retry_delay_seconds)
+
+        if last_error is not None:
+            raise XianyuTransientError("登录状态检查发生暂态网络错误") from last_error
+        return False
+
+    def get_token(self, device_id, retry_count=0, relogin_attempted=False):
+        if retry_count >= self.token_request_max_attempts:
+            if relogin_attempted:
+                raise XianyuAuthenticationError("Cookie 重新登录后仍无法获取 Token")
             logger.warning("获取token失败，尝试重新登陆")
-            # 尝试通过hasLogin重新登录
             if self.hasLogin():
                 logger.info("重新登录成功，重新尝试获取token")
-                return self.get_token(device_id, 0)  # 重置重试次数
+                return self.get_token(device_id, 0, relogin_attempted=True)
             else:
                 logger.error("重新登录失败，Cookie已失效")
                 logger.error("🔴 程序即将退出，请更新.env文件中的COOKIES_STR后重新启动")
@@ -200,7 +219,13 @@ class XianyuApis:
         params['sign'] = sign
         
         try:
-            response = self.session.post('https://h5api.m.goofish.com/h5/mtop.taobao.idlemessage.pc.login.token/1.0/', headers=headers, params=params, data=data)
+            response = self.session.post(
+                'https://h5api.m.goofish.com/h5/mtop.taobao.idlemessage.pc.login.token/1.0/',
+                headers=headers,
+                params=params,
+                data=data,
+                timeout=self.request_timeout_seconds,
+            )
             res_json = response.json()
             
             if isinstance(res_json, dict):
@@ -253,20 +278,33 @@ class XianyuApis:
                         logger.debug("检测到Set-Cookie，更新cookie")  # 降级为DEBUG并简化
                         self.clear_duplicate_cookies()
                     time.sleep(0.5)
-                    return self.get_token(device_id, retry_count + 1)
+                    return self.get_token(device_id, retry_count + 1, relogin_attempted)
                 else:
                     logger.info("Token获取成功")
                     return res_json
             else:
                 logger.error(f"Token API返回格式异常: {res_json}")
-                return self.get_token(device_id, retry_count + 1)
+                return self.get_token(device_id, retry_count + 1, relogin_attempted)
                 
         except XianyuAuthenticationError:
             raise
+        except requests.RequestException as e:
+            logger.warning(
+                "Token API暂态网络失败 ({}/{}): {}",
+                retry_count + 1,
+                self.token_request_max_attempts,
+                type(e).__name__,
+            )
+            if retry_count + 1 >= self.token_request_max_attempts:
+                raise XianyuTransientError("Token API 连续网络请求失败") from e
+            time.sleep(self.retry_delay_seconds)
+            return self.get_token(device_id, retry_count + 1, relogin_attempted)
         except Exception as e:
             logger.error(f"Token API请求异常: {str(e)}")
-            time.sleep(0.5)
-            return self.get_token(device_id, retry_count + 1)
+            if retry_count + 1 >= self.token_request_max_attempts:
+                raise XianyuTransientError("Token API 连续返回不可用响应") from e
+            time.sleep(self.retry_delay_seconds)
+            return self.get_token(device_id, retry_count + 1, relogin_attempted)
 
     def get_item_info(self, item_id, retry_count=0):
         """获取商品信息，自动处理token失效的情况"""
