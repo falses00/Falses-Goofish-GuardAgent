@@ -5,6 +5,7 @@ import time
 import os
 import re
 import websockets
+from websockets.asyncio.client import connect as websocket_connect
 from loguru import logger
 from dotenv import load_dotenv, set_key
 from XianyuApis import XianyuApis, XianyuAuthenticationError
@@ -835,6 +836,10 @@ class XianyuLive:
             logger.error(f"处理心跳响应出错: {e}")
         return False
 
+    def create_websocket_connection(self, headers):
+        """Create a connection with the explicit modern asyncio client API."""
+        return websocket_connect(self.base_url, additional_headers=headers)
+
     async def main(self):
         while True:
             try:
@@ -853,7 +858,7 @@ class XianyuLive:
                     "Accept-Language": "zh-CN,zh;q=0.9",
                 }
 
-                async with websockets.connect(self.base_url, extra_headers=headers) as websocket:
+                async with self.create_websocket_connection(headers) as websocket:
                     self.ws = websocket
                     await self.init(websocket)
 
