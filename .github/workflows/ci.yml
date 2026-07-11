@@ -8,8 +8,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - name: Install dependencies
@@ -17,9 +17,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
       - name: Unit tests
-        run: pytest tests/test_agents.py tests/test_agent_runtime.py tests/test_message_aggregation.py tests/test_product_rules.py tests/test_human_style.py tests/test_reply_outbox.py tests/test_live_reply_execution.py tests/test_api.py -q
+        run: python -m pytest -q
       - name: Compile check
-        run: python -m py_compile main.py XianyuAgent.py context_manager.py core/agent_registry.py core/experts.py core/human_style.py core/message_aggregation.py core/model_provider.py core/observability.py core/product_rules.py core/reply_outbox.py core/runtime_config.py core/evaluation.py core/trace_store.py api/app.py tests/test_agents.py tests/test_agent_runtime.py tests/test_message_aggregation.py tests/test_product_rules.py tests/test_human_style.py tests/test_reply_outbox.py tests/test_live_reply_execution.py tests/test_api.py
+        run: python -m compileall -q main.py XianyuAgent.py XianyuApis.py context_manager.py core api tests tools
       - name: Runtime readiness
         env:
           AGNES_API_KEY: ci-test-key
