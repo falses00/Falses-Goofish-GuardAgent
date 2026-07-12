@@ -1,9 +1,11 @@
 import asyncio
+import time
 
 import pytest
 import requests
 
 from XianyuApis import XianyuApis, XianyuAuthenticationError, XianyuTransientError
+from core.runtime_status import NullRuntimeStatusStore
 from main import XianyuLive
 
 
@@ -92,8 +94,88 @@ def test_successful_refresh_clears_stale_authentication_error():
     live.current_token = None
     live.last_token_refresh_time = 0
     live.authentication_error = XianyuAuthenticationError("stale")
+    live.runtime_status = NullRuntimeStatusStore()
+    live.xianyu_api_lock = asyncio.Lock()
 
     token = asyncio.run(live.refresh_token())
 
     assert token == "fresh-token"
     assert live.authentication_error is None
+
+
+def test_token_refresh_does_not_block_event_loop():
+    class SlowTokenApi:
+        @staticmethod
+        def get_token(device_id):
+            time.sleep(0.1)
+            return {"data": {"accessToken": "fresh-token"}}
+
+    async def scenario():
+        live = object.__new__(XianyuLive)
+        live.xianyu = SlowTokenApi()
+        live.device_id = "device"
+        live.current_token = None
+        live.last_token_refresh_time = 0
+        live.authentication_error = None
+        live.runtime_status = NullRuntimeStatusStore()
+        live.xianyu_api_lock = asyncio.Lock()
+
+        refresh_task = asyncio.create_task(live.refresh_token())
+        await asyncio.sleep(0.01)
+        event_loop_remained_responsive = not refresh_task.done()
+        token = await refresh_task
+        return event_loop_remained_responsive, token
+
+    responsive, token = asyncio.run(scenario())
+
+    assert responsive is True
+    assert token == "fresh-token"
+
+
+def test_connection_retry_uses_bounded_exponential_backoff():
+    live = object.__new__(XianyuLive)
+    live.connection_retry_base_seconds = 2
+    live.connection_retry_max_seconds = 10
+    live.connection_retry_jitter_ratio = 0
+
+    assert [live.calculate_connection_retry_delay(attempt) for attempt in range(1, 6)] == [
+        2,
+        4,
+        8,
+        10,
+        10,
+    ]
+
+
+def test_heartbeat_timeout_closes_connection_and_marks_status():
+    class RecordingStatus:
+        def __init__(self):
+            self.updates = []
+
+        def update(self, state=None, **fields):
+            self.updates.append((state, fields))
+            return {}
+
+    class FakeWebSocket:
+        def __init__(self):
+            self.closed = None
+
+        async def close(self, **kwargs):
+            self.closed = kwargs
+
+    live = object.__new__(XianyuLive)
+    live.heartbeat_interval = 15
+    live.heartbeat_timeout = 5
+    now = time.time()
+    live.last_heartbeat_time = now
+    live.last_heartbeat_response = now - 21
+    live.runtime_status = RecordingStatus()
+    websocket = FakeWebSocket()
+
+    asyncio.run(live.heartbeat_loop(websocket))
+
+    assert websocket.closed == {"code": 1011, "reason": "heartbeat timeout"}
+    assert live.runtime_status.updates[-1] == (
+        "heartbeat_timeout",
+        {"last_error_type": "heartbeat_timeout"},
+    )

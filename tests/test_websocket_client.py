@@ -14,6 +14,7 @@ def test_websocket_connection_uses_modern_header_argument(monkeypatch):
     monkeypatch.setattr(main_module, "websocket_connect", fake_connect)
     live = object.__new__(XianyuLive)
     live.base_url = "wss://example.test/"
+    live.websocket_open_timeout = 7
     headers = {"Cookie": "unb=test"}
 
     connection = live.create_websocket_connection(headers)
@@ -21,5 +22,9 @@ def test_websocket_connection_uses_modern_header_argument(monkeypatch):
     assert connection is expected_connection
     assert captured == {
         "uri": "wss://example.test/",
-        "kwargs": {"additional_headers": headers},
+        "kwargs": {
+            "additional_headers": headers,
+            "open_timeout": 7,
+            "ping_interval": None,
+        },
     }

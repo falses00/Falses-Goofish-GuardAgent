@@ -20,6 +20,7 @@ from core.message_aggregation import MessageAggregator
 from core.model_provider import has_model_api_key
 from core.reply_outbox import ReplyOutbox
 from core.runtime_config import diagnose_runtime
+from core.runtime_status import NullRuntimeStatusStore, RuntimeStatusStore, build_runtime_status_report
 
 
 class XianyuLive:
@@ -32,6 +33,7 @@ class XianyuLive:
         reply_outbox=None,
         seller_id=None,
         reply_send_dry_run=None,
+        runtime_status_store=None,
     ):
         self.xianyu = xianyu_api or XianyuApis()
         self.base_url = 'wss://wss-goofish.dingtalk.com/'
@@ -47,6 +49,8 @@ class XianyuLive:
         if context_manager is not None and context_manager is not self.bot.db:
             raise ValueError("XianyuLive and XianyuReplyBot must share one ChatContextManager instance")
         self.context_manager = context_manager or self.bot.db
+        self.xianyu_api_lock = asyncio.Lock()
+        self.agent_decision_lock = asyncio.Lock()
 
         # 心跳相关配置
         self.heartbeat_interval = int(os.getenv("HEARTBEAT_INTERVAL", "15"))  # 心跳间隔，默认15秒
@@ -64,6 +68,18 @@ class XianyuLive:
         self.token_refresh_task = None
         self.connection_restart_flag = False  # 连接重启标志
         self.authentication_error = None
+        self.websocket_open_timeout = float(os.getenv("WEBSOCKET_OPEN_TIMEOUT_SECONDS", "10"))
+        self.connection_retry_base_seconds = max(
+            0.1, float(os.getenv("CONNECTION_RETRY_BASE_SECONDS", "5"))
+        )
+        self.connection_retry_max_seconds = max(
+            self.connection_retry_base_seconds,
+            float(os.getenv("CONNECTION_RETRY_MAX_SECONDS", "60")),
+        )
+        self.connection_retry_jitter_ratio = min(
+            1.0, max(0.0, float(os.getenv("CONNECTION_RETRY_JITTER_RATIO", "0.2")))
+        )
+        self.runtime_status = runtime_status_store or NullRuntimeStatusStore()
 
         # 人工接管相关配置
         self.manual_mode_conversations = set()  # 存储处于人工接管模式的会话ID
@@ -90,6 +106,29 @@ class XianyuLive:
 
         # 模拟人工输入配置
         self.simulate_human_typing = os.getenv("SIMULATE_HUMAN_TYPING", "False").lower() == "true"
+        self._update_runtime_status(
+            "starting",
+            dry_run=self.reply_send_dry_run,
+            reconnect_attempt=0,
+            next_retry_seconds=0,
+            last_error_type=None,
+        )
+
+    def _update_runtime_status(self, state=None, **fields):
+        try:
+            return self.runtime_status.update(state, **fields)
+        except Exception as exc:
+            logger.warning(f"运行状态写入失败: {type(exc).__name__}")
+            return {}
+
+    def calculate_connection_retry_delay(self, attempt):
+        exponent = max(0, int(attempt) - 1)
+        base_delay = min(
+            self.connection_retry_max_seconds,
+            self.connection_retry_base_seconds * (2 ** exponent),
+        )
+        jitter = random.uniform(0, base_delay * self.connection_retry_jitter_ratio)
+        return min(self.connection_retry_max_seconds, base_delay + jitter)
 
     async def refresh_token(self):
         """刷新token"""
@@ -97,12 +136,17 @@ class XianyuLive:
             logger.info("开始刷新token...")
 
             # 获取新 token；认证失效会抛出 typed error 交给连接层处理。
-            token_result = self.xianyu.get_token(self.device_id)
+            async with self.xianyu_api_lock:
+                token_result = await asyncio.to_thread(self.xianyu.get_token, self.device_id)
             if 'data' in token_result and 'accessToken' in token_result['data']:
                 new_token = token_result['data']['accessToken']
                 self.current_token = new_token
                 self.last_token_refresh_time = time.time()
                 self.authentication_error = None
+                self._update_runtime_status(
+                    last_token_refresh_at=round(self.last_token_refresh_time, 3),
+                    last_error_type=None,
+                )
                 logger.info("Token刷新成功")
                 return new_token
             else:
@@ -113,6 +157,7 @@ class XianyuLive:
             raise
         except XianyuTransientError as exc:
             logger.warning(f"Token刷新暂态失败，稍后重试: {exc}")
+            self._update_runtime_status("degraded", last_error_type=type(exc).__name__)
             return None
         except Exception as e:
             logger.error(f"Token刷新异常: {str(e)}")
@@ -147,6 +192,7 @@ class XianyuLive:
 
             except XianyuAuthenticationError as exc:
                 logger.error("Cookie 认证失效，停止 token 刷新任务")
+                self._update_runtime_status("auth_failed", last_error_type=type(exc).__name__)
                 non_interactive = os.getenv("NON_INTERACTIVE", "false").lower() in {"1", "true", "yes", "on"}
                 if non_interactive:
                     self.authentication_error = exc
@@ -236,6 +282,13 @@ class XianyuLive:
              "pts": int(time.time() * 1000) * 1000, "seq": 0, "timestamp": int(time.time() * 1000)}]}
         await ws.send(json.dumps(msg))
         logger.info('连接注册完成')
+        self._update_runtime_status(
+            "registered",
+            reconnect_attempt=0,
+            next_retry_seconds=0,
+            last_registered_at=round(time.time(), 3),
+            last_error_type=None,
+        )
 
     def is_chat_message(self, message):
         """判断是否为用户聊天消息"""
@@ -437,7 +490,8 @@ class XianyuLive:
         item_info = self.context_manager.get_item_info(item_id)
         if not item_info:
             logger.info(f"从API获取商品信息: {item_id}")
-            api_result = self.xianyu.get_item_info(item_id)
+            async with self.xianyu_api_lock:
+                api_result = await asyncio.to_thread(self.xianyu.get_item_info, item_id)
             if 'data' in api_result and 'itemDO' in api_result['data']:
                 item_info = api_result['data']['itemDO']
                 self.context_manager.save_item_info(item_id, item_info)
@@ -450,13 +504,17 @@ class XianyuLive:
         item_description = f"当前商品的信息如下：{self.build_item_description(item_info)}"
 
         context = self.context_manager.get_context_by_chat(chat_id)
-        bot_reply = self.bot.generate_reply(
-            send_message,
-            item_description,
-            context=context,
-            chat_id=chat_id,
-            item_id=item_id,
-        )
+        async with self.agent_decision_lock:
+            bot_reply = await asyncio.to_thread(
+                self.bot.generate_reply,
+                send_message,
+                item_description,
+                context=context,
+                chat_id=chat_id,
+                item_id=item_id,
+            )
+            bot_intent = self.bot.last_intent
+            bot_trace = self.bot.last_trace.to_dict()
 
         if aggregation_count > 1:
             logger.info(f"已将 {aggregation_count} 条连续买家消息聚合为 1 次 Agent 决策: chat_id={chat_id}")
@@ -471,7 +529,7 @@ class XianyuLive:
                 send_message,
                 self.myid,
                 assistant_text=None,
-                intent=self.bot.last_intent
+                intent=bot_intent
             )
             no_reply_record = self.reply_outbox.enqueue(
                 chat_id=chat_id,
@@ -479,7 +537,7 @@ class XianyuLive:
                 user_id=send_user_id,
                 source_message_id=source_message_id,
                 reply_text="-",
-                trace=self.bot.last_trace.to_dict(),
+                trace=bot_trace,
             )
             self.reply_outbox.mark_skipped(no_reply_record.dedupe_key, "no_reply")
             return
@@ -491,21 +549,20 @@ class XianyuLive:
             send_message,
             self.myid,
             assistant_text=bot_reply,
-            intent=self.bot.last_intent
+            intent=bot_intent
         )
-        if self.bot.last_intent == "price":
+        if bot_intent == "price":
             bargain_count = self.context_manager.get_bargain_count_by_chat(chat_id)
             logger.info(f"用户 {send_user_name} 对商品 {item_id} 的议价次数: {bargain_count}")
 
         logger.info(f"机器人回复: {bot_reply}")
-        trace = self.bot.last_trace.to_dict()
         outbox_record = self.reply_outbox.enqueue(
             chat_id=chat_id,
             item_id=item_id,
             user_id=send_user_id,
             source_message_id=source_message_id,
             reply_text=bot_reply,
-            trace=trace,
+            trace=bot_trace,
         )
         await self._deliver_outbox_record(websocket, outbox_record)
 
@@ -797,6 +854,9 @@ class XianyuLive:
             }
             await ws.send(json.dumps(heartbeat_msg))
             self.last_heartbeat_time = time.time()
+            self._update_runtime_status(
+                last_heartbeat_sent_at=round(self.last_heartbeat_time, 3)
+            )
             logger.debug("心跳包已发送")
             return heartbeat_mid
         except Exception as e:
@@ -816,12 +876,19 @@ class XianyuLive:
                 # 检查上次心跳响应时间，如果超时则认为连接已断开
                 if (current_time - self.last_heartbeat_response) > (self.heartbeat_interval + self.heartbeat_timeout):
                     logger.warning("心跳响应超时，可能连接已断开")
-                    break
+                    self._update_runtime_status("heartbeat_timeout", last_error_type="heartbeat_timeout")
+                    await ws.close(code=1011, reason="heartbeat timeout")
+                    return
 
                 await asyncio.sleep(1)
             except Exception as e:
                 logger.error(f"心跳循环出错: {e}")
-                break
+                self._update_runtime_status("heartbeat_failed", last_error_type=type(e).__name__)
+                try:
+                    await ws.close(code=1011, reason="heartbeat failure")
+                except Exception:
+                    pass
+                return
 
     async def handle_heartbeat_response(self, message_data):
         """处理心跳响应"""
@@ -834,6 +901,11 @@ class XianyuLive:
                 and message_data["code"] == 200
             ):
                 self.last_heartbeat_response = time.time()
+                self._update_runtime_status(
+                    "registered",
+                    last_heartbeat_response_at=round(self.last_heartbeat_response, 3),
+                    last_error_type=None,
+                )
                 logger.debug("收到心跳响应")
                 return True
         except Exception as e:
@@ -842,13 +914,27 @@ class XianyuLive:
 
     def create_websocket_connection(self, headers):
         """Create a connection with the explicit modern asyncio client API."""
-        return websocket_connect(self.base_url, additional_headers=headers)
+        return websocket_connect(
+            self.base_url,
+            additional_headers=headers,
+            open_timeout=self.websocket_open_timeout,
+            ping_interval=None,
+        )
 
     async def main(self):
+        retry_attempt = 0
         while True:
+            fatal_authentication = False
+            retry_delay_override = None
             try:
                 # 重置连接重启标志
                 self.connection_restart_flag = False
+                self._update_runtime_status(
+                    "connecting",
+                    reconnect_attempt=retry_attempt,
+                    next_retry_seconds=0,
+                    last_error_type=None,
+                )
 
                 headers = {
                     "Cookie": self.cookies_str,
@@ -865,6 +951,7 @@ class XianyuLive:
                 async with self.create_websocket_connection(headers) as websocket:
                     self.ws = websocket
                     await self.init(websocket)
+                    retry_attempt = 0
 
                     # 初始化心跳时间
                     self.last_heartbeat_time = time.time()
@@ -913,20 +1000,29 @@ class XianyuLive:
                             logger.error(f"处理消息时发生错误: {str(e)}")
                             logger.debug(f"原始消息: {message}")
 
-            except websockets.exceptions.ConnectionClosed:
+            except websockets.exceptions.ConnectionClosed as exc:
                 if self.authentication_error:
+                    fatal_authentication = True
+                    self._update_runtime_status(
+                        "auth_failed",
+                        last_error_type=type(self.authentication_error).__name__,
+                    )
                     raise self.authentication_error
                 logger.warning("WebSocket连接已关闭")
+                self._update_runtime_status("disconnected", last_error_type=type(exc).__name__)
 
             except XianyuAuthenticationError as exc:
                 logger.error(f"闲鱼认证不可用: {exc}")
+                self._update_runtime_status("auth_failed", last_error_type=type(exc).__name__)
                 non_interactive = os.getenv("NON_INTERACTIVE", "false").lower() in {"1", "true", "yes", "on"}
                 if non_interactive:
+                    fatal_authentication = True
                     raise
-                await asyncio.sleep(self.token_retry_interval)
+                retry_delay_override = self.token_retry_interval
 
             except Exception as e:
-                logger.error(f"连接发生错误: {e}")
+                logger.error(f"连接发生错误: {type(e).__name__}: {e}")
+                self._update_runtime_status("disconnected", last_error_type=type(e).__name__)
 
             finally:
                 # 清理任务
@@ -936,6 +1032,7 @@ class XianyuLive:
                         await self.heartbeat_task
                     except asyncio.CancelledError:
                         pass
+                    self.heartbeat_task = None
 
                 if self.token_refresh_task:
                     self.token_refresh_task.cancel()
@@ -943,6 +1040,7 @@ class XianyuLive:
                         await self.token_refresh_task
                     except asyncio.CancelledError:
                         pass
+                    self.token_refresh_task = None
 
                 if self.message_flush_tasks:
                     pending_flush_tasks = list(self.message_flush_tasks.values())
@@ -950,13 +1048,24 @@ class XianyuLive:
                         task.cancel()
                     await asyncio.gather(*pending_flush_tasks, return_exceptions=True)
                     self.message_flush_tasks.clear()
+                self.ws = None
 
-                # 如果是主动重启，立即重连；否则等待5秒
-                if self.connection_restart_flag:
+                if fatal_authentication:
+                    self._update_runtime_status("auth_failed", next_retry_seconds=0)
+                elif self.connection_restart_flag:
                     logger.info("主动重启连接，立即重连...")
                 else:
-                    logger.info("等待5秒后重连...")
-                    await asyncio.sleep(5)
+                    retry_attempt += 1
+                    retry_delay = retry_delay_override or self.calculate_connection_retry_delay(retry_attempt)
+                    self._update_runtime_status(
+                        "reconnecting",
+                        reconnect_attempt=retry_attempt,
+                        next_retry_seconds=round(retry_delay, 3),
+                    )
+                    logger.info(
+                        f"连接将在 {retry_delay:.1f} 秒后重试 (attempt={retry_attempt})"
+                    )
+                    await asyncio.sleep(retry_delay)
 
 async def run_cli_mode():
     """
@@ -1374,6 +1483,13 @@ def run_doctor_mode() -> bool:
     return report.ready
 
 
+def run_status_mode() -> bool:
+    """Print the secret-free liveness snapshot produced by the live worker."""
+    report = build_runtime_status_report()
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return bool(report["healthy"])
+
+
 def check_and_complete_env():
     """检查并补全关键环境变量"""
     non_interactive = os.getenv("NON_INTERACTIVE", "false").lower() in {"1", "true", "yes", "on"}
@@ -1441,8 +1557,8 @@ if __name__ == '__main__':
         "--mode",
         type=str,
         default="xianyu",
-        choices=["xianyu", "cli", "smoke", "demo", "replay", "doctor"],
-        help="运行模式：xianyu (咸鱼 WebSocket 挂机模式，需 Cookie)；cli (本地交互)；smoke (离线 Agent 自检)；demo (真实 Agnes 无发送演示)；replay (离线执行链回放)；doctor (启动配置诊断)"
+        choices=["xianyu", "cli", "smoke", "demo", "replay", "doctor", "status"],
+        help="运行模式：xianyu (咸鱼 WebSocket 挂机模式，需 Cookie)；cli (本地交互)；smoke (离线 Agent 自检)；demo (真实 Agnes 无发送演示)；replay (离线执行链回放)；doctor (启动配置诊断)；status (实时运行状态)"
     )
     args = parser.parse_args()
 
@@ -1493,6 +1609,9 @@ if __name__ == '__main__':
     elif args.mode == "doctor":
         if not run_doctor_mode():
             sys.exit(1)
+    elif args.mode == "status":
+        if not run_status_mode():
+            sys.exit(1)
     else:
         # 挂机长连接模式下，交互式检查并补全 Cookie 和 API_KEY
         try:
@@ -1502,5 +1621,10 @@ if __name__ == '__main__':
             sys.exit(2)
         cookies_str = os.getenv("COOKIES_STR")
         bot = XianyuReplyBot()
-        xianyuLive = XianyuLive(cookies_str, reply_bot=bot, context_manager=bot.db)
+        xianyuLive = XianyuLive(
+            cookies_str,
+            reply_bot=bot,
+            context_manager=bot.db,
+            runtime_status_store=RuntimeStatusStore(),
+        )
         asyncio.run(xianyuLive.main())

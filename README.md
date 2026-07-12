@@ -196,7 +196,7 @@ bot.register_agent(
 
 ```text
 Falses-Goofish-GuardAgent/
-├── main.py                     # 启动入口：xianyu / cli / smoke / demo / replay / doctor
+├── main.py                     # 启动入口：xianyu / cli / smoke / demo / replay / doctor / status
 ├── XianyuAgent.py              # 意图路由、价格 Agent、详情 Agent、默认 Agent
 ├── XianyuApis.py               # 闲鱼 / Goofish API 与 WebSocket 封装
 ├── context_manager.py          # SQLite 会话历史、议价次数、价格承诺记忆
@@ -351,6 +351,14 @@ python main.py --mode xianyu
 `doctor` 不调用外部网络，也不会打印密钥；它会检查模型配置、Cookie 中的 `unb`、提示词以及商品规则/风格配置。容器中默认 `NON_INTERACTIVE=true`，配置不完整时直接退出并报告缺失项，不会无限等待终端输入。
 
 运行中若 Cookie 失效或触发滑块风控，API 层会抛出明确的认证异常。DNS、连接超时等暂态故障会进入有限重试和延迟恢复，不会被误判为 Cookie 失效；成功刷新 Token 后会清理陈旧认证错误。交互终端仍可现场更新 Cookie，非交互容器遇到确定的认证失败时停止连接，避免在风控状态下无限递归请求。
+
+另开终端可查看实时运行状态：
+
+```bash
+python main.py --mode status
+```
+
+`status` 读取 `logs/runtime_status.json` 的原子快照，报告 `connecting / registered / reconnecting / heartbeat_timeout / auth_failed` 等状态、快照新鲜度、最近 Token/注册/心跳时间和重连退避；文件不写入 Cookie、API Key 或消息正文。状态超过 `RUNTIME_STATUS_STALE_SECONDS` 未更新时返回非零退出码，可接入进程守护和监控。
 
 ### 6. Docker 部署
 

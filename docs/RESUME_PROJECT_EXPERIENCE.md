@@ -12,7 +12,9 @@
 - 将议价底线从 Prompt 剥离为确定性 `BargainExpert`，结合商品级 `min_price`、历史最低承诺价与买家最高报价生成单调价格决策；实测对 3500 元报价拒绝并反报价 4149 元，严格高于 3800 元底线。
 - 设计 SQLite 会话记忆与 Reply Outbox，原子记录用户/助手完整 turn，基于源事件哈希、事务 claim、状态机和超时租约抑制重连重复发送；离线 replay 验证重复事件只写入一轮记忆且网络发送为 0。
 - 完成真实闲鱼 Token 获取、WebSocket 注册、小时级 Token 刷新与断线重连验证；根据约 5.5 小时运行日志定位 DNS 暂态故障误判与陈旧认证错误问题，引入 typed transient error、HTTP 超时、有限重试及成功后状态清理，避免无人值守进程错误退出或放大平台请求。
-- 建立 `doctor / smoke / demo / replay / golden eval` 分层验证体系和 CI 门禁，覆盖模型故障降级、跨商品事实隔离、价格底线、规则承诺、Outbox 并发与认证失败路径；当前 pytest 回归用例 56 项全部通过，并完成 `websockets 13.1 / 15.x` 兼容验证。
+- 为业务心跳增加超时主动断链，并实现带抖动的指数重连退避；设计无密钥原子运行状态快照与 stale 检测，支持通过 CLI/守护进程判断注册、重连、心跳超时和认证失败，避免半开连接与断网请求风暴。
+- 将同步 Token/商品 API 与 Agnes SDK 调用迁移到工作线程，通过异步锁保护共享 HTTP Session 和 Agent Trace 状态，使慢模型与上游超时不再阻塞 WebSocket 心跳和消息消费循环。
+- 建立 `doctor / status / smoke / demo / replay / golden eval` 分层验证体系和 CI 门禁，覆盖模型故障降级、跨商品事实隔离、价格底线、规则承诺、Outbox 并发、事件循环阻塞、状态陈旧、敏感字段污染和认证失败路径；当前 pytest 回归用例 64 项全部通过，并完成 `websockets 13.1 / 15.x` 兼容验证。
 
 **项目链接：** https://github.com/falses00/Falses-Goofish-GuardAgent
 

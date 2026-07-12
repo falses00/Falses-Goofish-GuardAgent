@@ -34,6 +34,7 @@ The project already had routing, SQLite memory, trace logging, smoke mode, deter
 - `core/message_aggregation.py`: input-boundary debounce layer that turns bursty platform events into one stable user turn before routing.
 - `core/agent_registry.py`: extensible intent-to-handler registry with explicit fallback and runtime capability discovery.
 - `core/runtime_config.py`: secret-free startup readiness checks for model credentials, Xianyu identity, prompts, and policy files.
+- `core/runtime_status.py`: atomic secret-free live-worker status snapshots with stale-process detection for operators and supervisors.
 - `core/product_rules.py`: structured product rule center for allowed promises, forbidden promises, refund boundaries, and auditable delivery decisions.
 - `core/human_style.py`: configurable human-seller style guardrail that detects and rewrites robotic customer-service tone before replies reach buyers.
 - `core/reply_outbox.py`: durable reply execution outbox with source-message dedupe, send claiming, sent/failed/skipped states, and retry semantics.
@@ -48,6 +49,8 @@ The project already had routing, SQLite memory, trace logging, smoke mode, deter
 - `core/evaluation.py`: deterministic offline evaluation harness with trace-aware assertions.
 - `tools/run_agent_eval.py`: CLI runner that emits JSON and Markdown eval reports.
 - `.github/workflows/ci.yml`: CI gate for unit tests, API tests, compile checks, readiness diagnostics, runtime smoke, agent eval pass rate, and Docker image build.
+- Live WebSocket recovery uses business-heartbeat-triggered close plus bounded exponential backoff and jitter, avoiding half-open connections and retry storms after sleep or network loss.
+- Blocking requests/OpenAI-compatible SDK calls run via `asyncio.to_thread`; separate async locks preserve Session and mutable Agent trace consistency without starving heartbeat or message-consumer tasks.
 
 ## How To Demo In An Interview
 
