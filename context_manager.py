@@ -35,7 +35,18 @@ class ChatContextManager:
         """
         self.max_history = max_history
         self.db_path = db_path or os.getenv("CHAT_DB_PATH", "data/chat_history.db")
+        try:
+            self.busy_timeout_ms = max(1000, int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "30000")))
+        except ValueError:
+            self.busy_timeout_ms = 30000
         self._init_db()
+
+    def _connect(self):
+        conn = sqlite3.connect(self.db_path, timeout=self.busy_timeout_ms / 1000)
+        conn.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        return conn
 
     def _trim_messages_by_chat(self, cursor, chat_id):
         """Keep only the latest max_history messages for one chat."""
@@ -60,7 +71,8 @@ class ChatContextManager:
         if db_dir and not os.path.exists(db_dir):
             os.makedirs(db_dir)
 
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
+        conn.execute("PRAGMA journal_mode = WAL")
         cursor = conn.cursor()
 
         # 创建消息表
@@ -142,7 +154,7 @@ class ChatContextManager:
             item_id: 商品ID
             item_data: 商品信息字典
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
 
         try:
@@ -184,7 +196,7 @@ class ChatContextManager:
         Returns:
             dict: 商品信息字典，如果不存在返回None
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
 
         try:
@@ -214,7 +226,7 @@ class ChatContextManager:
             role: 消息角色 (user/assistant)
             content: 消息内容
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
 
         try:
@@ -240,7 +252,7 @@ class ChatContextManager:
         This avoids half-written memory such as a user message without its assistant reply,
         or a reply recorded without the matching bargain-count transition.
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
         now = datetime.now().isoformat()
 
@@ -281,7 +293,7 @@ class ChatContextManager:
         """
         Return messages, bargain count, and price commitments in one consistent snapshot.
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
 
         try:
@@ -350,7 +362,7 @@ class ChatContextManager:
         Args:
             chat_id: 会话ID
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
 
         try:
@@ -383,7 +395,7 @@ class ChatContextManager:
         Returns:
             int: 议价次数
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
 
         try:
@@ -404,7 +416,7 @@ class ChatContextManager:
         """
         获取我们在该会话中向买家承诺的最低价，以及买家出的最高价
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
         try:
             cursor.execute(
@@ -428,7 +440,7 @@ class ChatContextManager:
         lowest_price_committed 只记录我方承诺过的最低价格，避免后续回复涨回去；
         buyer_highest_offer 只记录买家历史最高出价，避免低出价覆盖高出价。
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
         try:
             # 确保行记录存在，使用 INSERT OR IGNORE 或 UPSERT
@@ -495,7 +507,7 @@ class ChatContextManager:
 
         主要用于本地 CLI mock 演示，避免上一轮调试缓存影响下一轮演示。
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
         try:
             cursor.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))

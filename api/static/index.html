@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="description" content="本地优先的闲鱼卖家 Agent 操作台">
+    <title>闲鱼卖家 Agent 操作台</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+
+    <header class="app-header">
+      <div class="header-inner">
+        <div class="product-lockup">
+          <p class="product-kicker">Falses Goofish GuardAgent</p>
+          <h1>闲鱼卖家 Agent 操作台</h1>
+        </div>
+
+        <div class="header-operations">
+          <ul class="service-status" aria-label="服务状态">
+            <li class="status-item" id="apiStatus" data-tone="loading">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span>
+                <span class="status-label">API</span>
+                <strong class="status-value">检查中</strong>
+              </span>
+            </li>
+            <li class="status-item" id="workerStatus" data-tone="loading">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span>
+                <span class="status-label">闲鱼 Worker</span>
+                <strong class="status-value">检查中</strong>
+              </span>
+            </li>
+            <li class="status-item" id="modeStatus" data-tone="loading">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span>
+                <span class="status-label">发送模式</span>
+                <strong class="status-value">检查中</strong>
+              </span>
+            </li>
+          </ul>
+
+          <div class="header-actions">
+            <button class="button button-secondary button-compact" id="refreshAllButton" type="button">
+              刷新状态
+            </button>
+            <button class="button button-secondary button-compact" id="openTokenButton" type="button" aria-haspopup="dialog">
+              访问令牌
+              <span class="token-indicator" id="tokenIndicator" data-active="false" aria-hidden="true"></span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main id="main-content" class="page-shell">
+      <div class="notice" id="globalNotice" role="status" aria-live="polite" hidden>
+        <div>
+          <strong id="globalNoticeTitle"></strong>
+          <p id="globalNoticeMessage"></p>
+        </div>
+        <button class="notice-dismiss" id="dismissNoticeButton" type="button" aria-label="关闭提示">关闭</button>
+      </div>
+
+      <section class="overview-section" aria-labelledby="overviewTitle">
+        <div class="section-heading heading-row">
+          <div>
+            <p class="section-kicker">运行总览</p>
+            <h2 id="overviewTitle">先确认服务，再处理消息</h2>
+          </div>
+          <p class="updated-time" id="overviewUpdatedAt">正在读取本地运行快照</p>
+        </div>
+
+        <div class="metric-grid" id="metricGrid" aria-live="polite" aria-busy="true">
+          <article class="metric-item">
+            <span class="metric-label">Worker 状态</span>
+            <strong class="metric-value skeleton-text" id="workerMetric">读取中</strong>
+            <span class="metric-note" id="workerMetricNote">等待运行快照</span>
+          </article>
+          <article class="metric-item">
+            <span class="metric-label">最近心跳</span>
+            <strong class="metric-value skeleton-text" id="heartbeatMetric">读取中</strong>
+            <span class="metric-note" id="heartbeatMetricNote">等待 Worker 上报</span>
+          </article>
+          <article class="metric-item">
+            <span class="metric-label">最近 Trace</span>
+            <strong class="metric-value skeleton-text" id="traceMetric">读取中</strong>
+            <span class="metric-note" id="traceMetricNote">最近 50 条采样</span>
+          </article>
+          <article class="metric-item">
+            <span class="metric-label">护栏触发 / 模型降级</span>
+            <strong class="metric-value skeleton-text" id="guardrailMetric">读取中</strong>
+            <span class="metric-note" id="guardrailMetricNote">来自真实 Trace</span>
+          </article>
+        </div>
+      </section>
+
+      <div class="workbench">
+        <section class="panel simulator-panel" aria-labelledby="simulatorTitle">
+          <div class="panel-heading">
+            <div>
+              <p class="section-kicker">安全试跑</p>
+              <h2 id="simulatorTitle">模拟一条买家消息</h2>
+            </div>
+            <span class="safe-badge">不会真实发送</span>
+          </div>
+
+          <div class="safety-note">
+            <strong>只生成回复，不触达闲鱼买家。</strong>
+            <span>如勾选“写入本地记忆”，本次对话会保存到本机数据库。</span>
+          </div>
+
+          <form id="replyForm" novalidate>
+            <div class="field-group">
+              <label for="userMessage">买家消息</label>
+              <textarea id="userMessage" name="user_msg" rows="5" maxlength="2000" required placeholder="例如：3000 元能出吗？屏幕有划痕吗？" aria-describedby="userMessageHelp userMessageCount"></textarea>
+              <div class="field-meta">
+                <span id="userMessageHelp">必填，最多 2000 字</span>
+                <span id="userMessageCount">0 / 2000</span>
+              </div>
+              <p class="field-error" id="userMessageError" role="alert" hidden></p>
+            </div>
+
+            <details class="advanced-fields" id="advancedFields">
+              <summary>高级字段</summary>
+              <div class="advanced-body">
+                <div class="field-group">
+                  <label for="additionalMessages">连续消息</label>
+                  <textarea id="additionalMessages" name="additional_user_msgs" rows="3" placeholder="每行一条，最多 10 条"></textarea>
+                  <span class="field-hint">用于模拟买家连续发来的补充消息，每条最多 1000 字。</span>
+                </div>
+
+                <div class="form-grid">
+                  <div class="field-group field-span-2">
+                    <label for="requestId">请求 ID</label>
+                    <div class="input-action">
+                    <input id="requestId" name="request_id" maxlength="128" pattern="[A-Za-z0-9._:\-]+" autocomplete="off" aria-describedby="requestIdHelp">
+                      <button class="button button-secondary" id="generateRequestIdButton" type="button">生成</button>
+                    </div>
+                    <span class="field-hint" id="requestIdHelp">用于安全重试。相同 ID 只能对应相同内容。</span>
+                  </div>
+
+                  <div class="field-group">
+                    <label for="chatId">会话 ID</label>
+                    <input id="chatId" name="chat_id" value="console_chat_001" maxlength="128" required>
+                  </div>
+                  <div class="field-group">
+                    <label for="itemId">商品 ID</label>
+                    <input id="itemId" name="item_id" value="console_item_001" maxlength="128" required>
+                  </div>
+                  <div class="field-group">
+                    <label for="userId">买家 ID</label>
+                    <input id="userId" name="user_id" value="console_buyer" maxlength="128" required>
+                  </div>
+                  <div class="field-group">
+                    <label for="assistantId">卖家 ID</label>
+                    <input id="assistantId" name="assistant_id" value="console_seller" maxlength="128" required>
+                  </div>
+                </div>
+
+                <div class="field-group">
+                  <label for="itemInfo">商品信息 JSON</label>
+                  <textarea class="code-input" id="itemInfo" name="item_info" rows="5" spellcheck="false" placeholder='{"title":"二手 iPad","original_price":4299,"min_price":3800}'></textarea>
+                  <span class="field-hint">留空时使用服务端默认商品信息。</span>
+                  <p class="field-error" id="itemInfoError" role="alert" hidden></p>
+                </div>
+
+                <div class="field-group">
+                  <label for="conversationContext">对话上下文 JSON</label>
+                  <textarea class="code-input" id="conversationContext" name="context" rows="5" spellcheck="false" placeholder='[{"role":"user","content":"还在吗"}]'></textarea>
+                  <span class="field-hint">留空时由服务端读取该会话的本地记忆。</span>
+                  <p class="field-error" id="contextError" role="alert" hidden></p>
+                </div>
+
+                <label class="check-row" for="persistTurn">
+                  <input id="persistTurn" name="persist_turn" type="checkbox">
+                  <span>
+                    <strong>写入本地对话记忆</strong>
+                    <small>只影响本机数据，不会发送到闲鱼。</small>
+                  </span>
+                </label>
+              </div>
+            </details>
+
+            <div class="form-actions">
+              <button class="button button-primary" id="submitReplyButton" type="submit">
+                <span class="button-label">生成模拟回复</span>
+                <span class="button-loading" hidden>生成中…</span>
+              </button>
+              <button class="button button-secondary" id="resetReplyButton" type="reset">清空结果</button>
+            </div>
+            <div class="form-feedback" id="replyFeedback" aria-live="assertive" hidden></div>
+          </form>
+        </section>
+
+        <section class="panel result-panel" aria-labelledby="resultTitle" aria-live="polite" aria-busy="false">
+          <div class="panel-heading result-heading">
+            <div>
+              <p class="section-kicker">决策结果</p>
+              <h2 id="resultTitle">回复、规则与记忆</h2>
+            </div>
+            <button class="button button-secondary button-compact" id="copyReplyButton" type="button" hidden>复制回复</button>
+          </div>
+
+          <div class="empty-state" id="resultEmpty">
+            <strong>还没有模拟结果</strong>
+            <p>输入一条买家消息后，这里会显示回复、意图、价格护栏、知识命中和本地记忆。</p>
+          </div>
+
+          <div class="result-loading" id="resultLoading" hidden aria-hidden="true">
+            <div class="skeleton-line skeleton-line-short"></div>
+            <div class="skeleton-line"></div>
+            <div class="skeleton-line"></div>
+            <div class="skeleton-block"></div>
+          </div>
+
+          <div class="result-content" id="resultContent" hidden>
+            <section class="result-block reply-block" aria-labelledby="replyOutputTitle">
+              <div class="result-block-heading">
+                <h3 id="replyOutputTitle">建议回复</h3>
+                <div class="badge-row" id="resultBadges"></div>
+              </div>
+              <blockquote id="replyOutput"></blockquote>
+              <p class="result-note" id="replayNote" hidden></p>
+            </section>
+
+            <section class="result-block" aria-labelledby="decisionOutputTitle">
+              <h3 id="decisionOutputTitle">意图与路由</h3>
+              <dl class="data-list" id="decisionOutput"></dl>
+            </section>
+
+            <section class="result-block" aria-labelledby="priceOutputTitle">
+              <h3 id="priceOutputTitle">价格决策</h3>
+              <div id="priceOutput"></div>
+            </section>
+
+            <section class="result-block" aria-labelledby="knowledgeOutputTitle">
+              <h3 id="knowledgeOutputTitle">知识命中</h3>
+              <div id="knowledgeOutput"></div>
+            </section>
+
+            <section class="result-block" aria-labelledby="memoryOutputTitle">
+              <h3 id="memoryOutputTitle">本地记忆</h3>
+              <div id="memoryOutput"></div>
+            </section>
+
+            <details class="raw-details">
+              <summary>查看原始响应</summary>
+              <pre id="rawReplyOutput"></pre>
+            </details>
+          </div>
+        </section>
+      </div>
+
+      <section class="panel traces-panel" aria-labelledby="tracesTitle">
+        <div class="panel-heading trace-heading">
+          <div>
+            <p class="section-kicker">最近决策</p>
+            <h2 id="tracesTitle">Trace 检查</h2>
+          </div>
+          <div class="trace-heading-actions">
+            <span id="traceCount" class="trace-count">读取中</span>
+            <button class="button button-secondary button-compact" id="refreshTracesButton" type="button">刷新 Trace</button>
+          </div>
+        </div>
+
+        <div class="trace-layout">
+          <div class="trace-list-region" aria-label="Trace 列表">
+            <div class="trace-list" id="traceList" aria-busy="true"></div>
+            <div class="empty-state compact-empty" id="traceEmpty" hidden>
+              <strong>暂无 Trace</strong>
+              <p>完成一次模拟回复后，新的决策记录会出现在这里。</p>
+            </div>
+            <div class="inline-error" id="traceError" role="alert" hidden>
+              <strong id="traceErrorTitle">无法读取 Trace</strong>
+              <p id="traceErrorMessage"></p>
+              <button class="button button-secondary button-compact" id="traceErrorAction" type="button">重试</button>
+            </div>
+          </div>
+
+          <article class="trace-detail" id="traceDetail" aria-live="polite" aria-labelledby="traceDetailTitle">
+            <div class="empty-state trace-detail-empty" id="traceDetailEmpty">
+              <strong>选择一条 Trace 查看详情</strong>
+              <p>可检查意图路由、护栏、定价、知识来源和模型降级。</p>
+            </div>
+            <div id="traceDetailContent" hidden>
+              <div class="trace-detail-header">
+                <div>
+                  <p class="trace-time" id="traceDetailTime"></p>
+                  <h3 id="traceDetailTitle">Trace 详情</h3>
+                </div>
+                <span class="badge" id="traceDetailIntent"></span>
+              </div>
+              <p class="trace-message" id="traceDetailMessage"></p>
+              <div class="trace-sections" id="traceSections"></div>
+              <details class="raw-details">
+                <summary>查看原始 Trace</summary>
+                <pre id="rawTraceOutput"></pre>
+              </details>
+            </div>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <dialog class="token-dialog" id="tokenDialog" aria-labelledby="tokenDialogTitle" aria-describedby="tokenDialogDescription">
+      <form id="tokenForm">
+        <div class="dialog-heading">
+          <div>
+            <p class="section-kicker">当前浏览器会话</p>
+            <h2 id="tokenDialogTitle">访问令牌</h2>
+          </div>
+          <button class="dialog-close" id="closeTokenButton" type="button" aria-label="关闭访问令牌窗口">关闭</button>
+        </div>
+        <p id="tokenDialogDescription">令牌仅保存在本标签页的 sessionStorage，关闭标签页后自动清除。</p>
+        <div class="field-group">
+          <label for="accessToken">Bearer token</label>
+          <input id="accessToken" name="access_token" type="password" autocomplete="off" spellcheck="false" placeholder="输入 API_ACCESS_TOKEN">
+        </div>
+        <label class="check-row compact-check" for="showToken">
+          <input id="showToken" type="checkbox">
+          <span><strong>显示令牌</strong></span>
+        </label>
+        <p class="dialog-status" id="tokenDialogStatus" aria-live="polite"></p>
+        <div class="dialog-actions">
+          <button class="button button-primary" type="submit">保存并重试</button>
+          <button class="button button-danger-quiet" id="clearTokenButton" type="button">移除令牌</button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>

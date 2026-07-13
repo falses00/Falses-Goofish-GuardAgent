@@ -36,6 +36,7 @@ logs/
 
 # 数据库文件
 *.db
+*.db-*
 *.sqlite3
 *.sqlite
 
@@ -48,6 +49,7 @@ logs/
 .coverage
 htmlcov/
 output/
+.playwright-cli/
 .pytest_cache/
 .tox/
 .nox/

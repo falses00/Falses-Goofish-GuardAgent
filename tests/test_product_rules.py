@@ -37,6 +37,16 @@ def test_product_rule_resolves_by_item_id():
     assert rule.delivery.requires_manual_confirm is False
 
 
+def test_product_rule_inherits_global_forbidden_promises():
+    store = ProductRuleStore()
+
+    rule = store.resolve(item_id="item_ipad")
+
+    assert "100%成功" in rule.forbidden_promises
+    assert "官方内部渠道" in rule.forbidden_promises
+    assert "加微信" in rule.forbidden_promises
+
+
 def test_delivery_decision_waits_until_paid():
     store = ProductRuleStore()
 

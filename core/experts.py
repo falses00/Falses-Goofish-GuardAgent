@@ -130,6 +130,24 @@ class FAQExpert:
             condition = self.product_info.get("condition", {})
             append_fact("外观与成色", condition.get("screen"), condition.get("body"))
 
+        # 型号、容量、电池等规格匹配
+        if any(
+            kw in user_msg_lower
+            for kw in ["型号", "容量", "内存", "存储", "gb", "128g", "256g", "512g", "1tb"]
+        ):
+            specs = self.product_info.get("specs", {})
+            append_fact(
+                "型号与规格",
+                specs.get("model"),
+                specs.get("storage"),
+                specs.get("network"),
+                specs.get("color"),
+            )
+
+        if any(kw in user_msg_lower for kw in ["电池", "健康", "循环", "续航"]):
+            specs = self.product_info.get("specs", {})
+            append_fact("电池状态", specs.get("battery_health"), specs.get("charge_cycles"))
+
         # 配件匹配
         if any(kw in user_msg_lower for kw in ["配件", "充电器", "线", "盒", "送", "包装"]):
             acc = self.product_info.get("accessories", {})
@@ -149,7 +167,7 @@ class FAQExpert:
             append_fact("面交与线下自提", self.product_info.get("faq", {}).get("face_to_face_trade"))
 
         # 换机原因匹配
-        if any(kw in user_msg_lower for kw in ["为什么卖", "换机", "出"]):
+        if any(kw in user_msg_lower for kw in ["为什么卖", "为什么出", "换机", "转手", "出掉"]):
             append_fact("转让原因", self.product_info.get("faq", {}).get("reason_for_selling"))
 
         if not matched:

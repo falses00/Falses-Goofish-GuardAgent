@@ -30,10 +30,12 @@ COPY data/*.json data/
 COPY evals/ evals/
 COPY tools/ tools/
 
-RUN mkdir -p logs output \
-    && python -m py_compile main.py XianyuAgent.py context_manager.py core/*.py api/*.py
+RUN addgroup --system --gid 10001 guardagent \
+    && adduser --system --uid 10001 --ingroup guardagent --home /app guardagent \
+    && mkdir -p logs output \
+    && python -m py_compile main.py XianyuAgent.py context_manager.py core/*.py api/*.py \
+    && chown -R guardagent:guardagent /app
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-    CMD ["python", "main.py", "--mode", "doctor"]
+USER guardagent
 
 CMD ["python", "main.py", "--mode", "xianyu"]

@@ -1,6 +1,6 @@
 import json
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -102,14 +102,20 @@ class ProductRuleStore:
         if item_id:
             for rule in self.rules:
                 if item_id in rule.item_ids:
-                    return rule
+                    return self._with_global_forbidden_promises(rule)
 
         title_lower = title.lower()
         for rule in self.rules:
             if any(match_title.lower() in title_lower for match_title in rule.match_titles):
-                return rule
+                return self._with_global_forbidden_promises(rule)
 
         return self.fallback_rule
+
+    def _with_global_forbidden_promises(self, rule: ProductRule) -> ProductRule:
+        forbidden = list(dict.fromkeys(
+            self.fallback_rule.forbidden_promises + rule.forbidden_promises
+        ))
+        return replace(rule, forbidden_promises=forbidden)
 
     @staticmethod
     def extract_item_info(item_desc: str) -> Dict[str, Any]:

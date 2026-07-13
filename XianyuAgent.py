@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from time import perf_counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Tuple
 from loguru import logger
@@ -142,12 +143,15 @@ class XianyuReplyBot:
         context: List[Dict],
         chat_id: str = "mock_chat_001",
         item_id: str = None,
+        persist_memory: bool = True,
     ) -> str:
         """
         生成回复主流程（扩展了 chat_id 参数以支持会话级报价跟踪）
         """
+        total_started = perf_counter()
         formatted_context = self.format_history(context)
         self.last_trace = AgentTrace(chat_id=chat_id, user_msg=user_msg)
+        policy_started = perf_counter()
         product_rule = self.rule_store.resolve(item_id=item_id, item_desc=item_desc)
         rule_context = self.rule_store.build_prompt_context(product_rule)
         style_context = self.human_styler.build_prompt_context()
@@ -158,9 +162,18 @@ class XianyuReplyBot:
             "delivery_after": product_rule.delivery.after,
             "requires_manual_confirm": product_rule.delivery.requires_manual_confirm,
         }
+        self.last_trace.timings_ms["policy_context"] = round(
+            (perf_counter() - policy_started) * 1000,
+            3,
+        )
 
         # 1. 三级意图分类路由决策
+        routing_started = perf_counter()
         detected_intent = self.router.detect(user_msg, enriched_item_desc, formatted_context)
+        self.last_trace.timings_ms["routing"] = round(
+            (perf_counter() - routing_started) * 1000,
+            3,
+        )
 
         if detected_intent == 'no_reply':
             logger.info(f"意图识别完成: no_reply - 无需回复")
@@ -171,6 +184,10 @@ class XianyuReplyBot:
             self.last_trace.model = {"router": self.router.last_trace}
             if self.router.last_trace.get("model", {}).get("status") == "fallback":
                 self.last_trace.guardrails.append("router_model_fallback")
+            self.last_trace.timings_ms["total"] = round(
+                (perf_counter() - total_started) * 1000,
+                3,
+            )
             logger.info(f"[AgentTrace] {json.dumps(self.last_trace.to_dict(), ensure_ascii=False)}")
             return "-"  # 返回特殊标记，表示无需回复
 
@@ -185,13 +202,20 @@ class XianyuReplyBot:
         logger.info(f"会话 {chat_id} 历史议价次数: {bargain_count}")
 
         # 3. 驱动对应 Agent 生成最终润色回复
+        generation_started = perf_counter()
         reply = agent.generate(
             user_msg=user_msg,
             item_desc=enriched_item_desc,
             context=formatted_context,
             bargain_count=bargain_count,
-            chat_id=chat_id
+            chat_id=chat_id,
+            persist_memory=persist_memory,
         )
+        self.last_trace.timings_ms["agent_generate"] = round(
+            (perf_counter() - generation_started) * 1000,
+            3,
+        )
+        guardrail_started = perf_counter()
         validation = self.rule_store.validate_reply(reply, product_rule)
         if not validation.safe:
             logger.warning(f"回复触发商品规则护栏: rule_id={product_rule.rule_id}, violations={validation.violations}")
@@ -217,6 +241,14 @@ class XianyuReplyBot:
         }
         self.last_trace.rules.update(validation.to_dict())
         self.last_trace.style = style_result.to_dict()
+        self.last_trace.timings_ms["guardrails_style"] = round(
+            (perf_counter() - guardrail_started) * 1000,
+            3,
+        )
+        self.last_trace.timings_ms["total"] = round(
+            (perf_counter() - total_started) * 1000,
+            3,
+        )
         logger.info(f"[AgentTrace] {json.dumps(self.last_trace.to_dict(), ensure_ascii=False)}")
         return reply
 
@@ -244,9 +276,14 @@ class IntentRouter:
     def __init__(self, classify_agent):
         self.rules = {
             'tech': {  # 技术细节与商品状况问询优先判定
-                'keywords': ['参数', '规格', '型号', '连接', '对比', '电池', '健康', '成色', '配件', '划痕', '磕碰', '发票', '哪里买', '顺丰', '邮费'],
+                'keywords': [
+                    '参数', '规格', '型号', '容量', '内存', '存储', '连接', '对比',
+                    '电池', '健康', '成色', '配件', '划痕', '磕碰', '发票',
+                    '哪里买', '顺丰', '邮费', '运费', '发货', '快递', '面交', '包装'
+                ],
                 'patterns': [
-                    r'和.+比', r'几成新', r'坏', r'拆', r'修', r'保修'
+                    r'和.+比', r'几成新', r'坏', r'拆', r'修', r'保修',
+                    r'(?i)\d+(?:gb?|tb?)'
                 ]
             },
             'price': { # 砍价意图判定
@@ -272,6 +309,14 @@ class IntentRouter:
     def detect(self, user_msg: str, item_desc, context) -> str:
         """三级路由策略"""
         text_clean = re.sub(r'[^\w\u4e00-\u9fa5]', '', user_msg)
+
+        # Explicit monetary offers must win over specification tokens such as
+        # "128GB" when both appear in one buyer message.
+        price_rule = self.rules.get("price", {})
+        for pattern in price_rule.get("patterns", []):
+            if re.search(pattern, text_clean):
+                self.last_trace = {"source": "rule", "intent": "price"}
+                return "price"
 
         # Deterministic rules run in explicit priority order before LLM routing.
         for intent in sorted(self.rules, key=lambda name: self.priorities.get(name, 50)):
@@ -307,7 +352,15 @@ class BaseAgent:
         self.db = db
         self.last_trace = {}
 
-    def generate(self, user_msg: str, item_desc: str, context: str, bargain_count: int = 0, chat_id: str = None) -> str:
+    def generate(
+        self,
+        user_msg: str,
+        item_desc: str,
+        context: str,
+        bargain_count: int = 0,
+        chat_id: str = None,
+        persist_memory: bool = True,
+    ) -> str:
         """生成回复的模板方法"""
         self.last_trace = {}
         messages = self._build_messages(user_msg, item_desc, context)
@@ -368,7 +421,15 @@ class PriceAgent(BaseAgent):
     二开重构后的议价处理 Agent。
     不再只是调整大模型温度，而是强制集成“议价卫士”数值安全护栏和 SQLite 价格记忆。
     """
-    def generate(self, user_msg: str, item_desc: str, context: str, bargain_count: int = 0, chat_id: str = None) -> str:
+    def generate(
+        self,
+        user_msg: str,
+        item_desc: str,
+        context: str,
+        bargain_count: int = 0,
+        chat_id: str = None,
+        persist_memory: bool = True,
+    ) -> str:
         # 1. 尝试从商品详情中动态提取当前定价与底价策略
         original_price, min_price, price_source = self._extract_price_profile(item_desc)
 
@@ -404,11 +465,12 @@ class PriceAgent(BaseAgent):
         logger.info(f"[议价卫士决策] 动作: {action} | 建议报价: {calculated_price} | 推理原因: {reason}")
 
         # 6. 更新持久化数据库中的报价承诺
-        self.db.update_price_commitments(
-            chat_id,
-            lowest_price_committed=calculated_price,
-            buyer_highest_offer=buyer_offer
-        )
+        if persist_memory:
+            self.db.update_price_commitments(
+                chat_id,
+                lowest_price_committed=calculated_price,
+                buyer_highest_offer=buyer_offer,
+            )
 
         # 8. 大模型话术润色 (注入算法决策结果，保证人设的生动性与价格的准确性)
         messages = self._build_messages(user_msg, item_desc, context)
@@ -529,7 +591,15 @@ class TechAgent(BaseAgent):
     二开重构后的技术/详情咨询 Agent。
     引入 RAG FAQ 思想，从本地商品知识库提取精准的规格参数并动态注入提示词，防止 LLM 满口跑火车。
     """
-    def generate(self, user_msg: str, item_desc: str, context: str, bargain_count: int = 0, chat_id: str = None) -> str:
+    def generate(
+        self,
+        user_msg: str,
+        item_desc: str,
+        context: str,
+        bargain_count: int = 0,
+        chat_id: str = None,
+        persist_memory: bool = True,
+    ) -> str:
         # The current item context is authoritative. The local JSON is only a
         # demo fallback for callers that did not provide structured item data.
         product_info = PriceAgent._extract_json_payload(item_desc)

@@ -18,6 +18,7 @@ class AgentTrace:
     model: Dict[str, Any] = field(default_factory=dict)
     rules: Dict[str, Any] = field(default_factory=dict)
     style: Dict[str, Any] = field(default_factory=dict)
+    timings_ms: Dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

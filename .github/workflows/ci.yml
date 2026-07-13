@@ -33,3 +33,37 @@ jobs:
         run: python tools/run_agent_eval.py --min-score 1.0
       - name: Build project image
         run: docker build -t falses-goofish-guardagent:ci .
+      - name: Container console smoke
+        run: |
+          docker run -d --name guardagent-ci-api \
+            -e API_OFFLINE_MODE=true \
+            -p 127.0.0.1:18000:8000 \
+            falses-goofish-guardagent:ci \
+            uvicorn api.app:app --host 0.0.0.0 --port 8000 --workers 1
+          trap 'docker logs guardagent-ci-api; docker rm -f guardagent-ci-api' EXIT
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent http://127.0.0.1:18000/health/ready; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:18000/health/ready
+          curl --fail --silent http://127.0.0.1:18000/ | grep -q "Falses Goofish GuardAgent"
+
+  websocket-compatibility:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        websockets: ["==13.1", ">=15,<16"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install compatibility dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install "websockets${{ matrix.websockets }}"
+      - name: Verify WebSocket client and recovery paths
+        run: python -m pytest tests/test_websocket_client.py tests/test_xianyu_resilience.py -q

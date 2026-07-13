@@ -4,17 +4,18 @@
 
 ### Falses Goofish GuardAgent｜闲鱼交易客服与议价安全 Agent
 
-**技术栈：** Python、FastAPI、WebSocket、SQLite、Agnes AI、OpenAI SDK、pytest、Docker、GitHub Actions
+**技术栈：** Python、FastAPI、WebSocket、SQLite、Agnes AI、OpenAI SDK、HTML/CSS/JavaScript、pytest、Docker、GitHub Actions
 
 **项目描述：** 基于闲鱼真实 WebSocket 消息链路构建本地优先交易 Agent，将商品咨询、议价、承诺校验和回复执行拆分为可观测、可回放的决策链路；LLM 负责自然语言表达，价格、商品事实、会话承诺和发送幂等由确定性模块控制。
 
-- 重构 `IntentRouter -> TechAgent / PriceAgent / DefaultAgent -> Guardrails -> LLM` 多 Agent 架构，通过可插拔注册表、商品事实检索和真人化表达层支持咨询、砍价与交易疑虑场景；真实 Agnes 三轮演示全部正常返回，Trace 可解释路由、知识来源与护栏。
+- 重构 `IntentRouter -> TechAgent / PriceAgent / DefaultAgent -> Guardrails -> LLM` 多 Agent 架构，通过可插拔注册表、商品事实检索和真人化表达层支持咨询、砍价与交易疑虑场景；真实 Agnes 三轮演示全部正常返回，Trace 可解释路由、知识来源、护栏及各阶段耗时。
 - 将议价底线从 Prompt 剥离为确定性 `BargainExpert`，结合商品级 `min_price`、历史最低承诺价与买家最高报价生成单调价格决策；实测对 3500 元报价拒绝并反报价 4149 元，严格高于 3800 元底线。
 - 设计 SQLite 会话记忆与 Reply Outbox，原子记录用户/助手完整 turn，基于源事件哈希、事务 claim、状态机和超时租约抑制重连重复发送；离线 replay 验证重复事件只写入一轮记忆且网络发送为 0。
 - 完成真实闲鱼 Token 获取、WebSocket 注册、小时级 Token 刷新与断线重连验证；根据约 5.5 小时运行日志定位 DNS 暂态故障误判与陈旧认证错误问题，引入 typed transient error、HTTP 超时、有限重试及成功后状态清理，避免无人值守进程错误退出或放大平台请求。
 - 为业务心跳增加超时主动断链，并实现带抖动的指数重连退避；设计无密钥原子运行状态快照与 stale 检测，支持通过 CLI/守护进程判断注册、重连、心跳超时和认证失败，避免半开连接与断网请求风暴。
 - 将同步 Token/商品 API 与 Agnes SDK 调用迁移到工作线程，通过异步锁保护共享 HTTP Session 和 Agent Trace 状态，使慢模型与上游超时不再阻塞 WebSocket 心跳和消息消费循环。
-- 建立 `doctor / status / smoke / demo / replay / golden eval` 分层验证体系和 CI 门禁，覆盖模型故障降级、跨商品事实隔离、价格底线、规则承诺、Outbox 并发、事件循环阻塞、状态陈旧、敏感字段污染和认证失败路径；当前 pytest 回归用例 64 项全部通过，并完成 `websockets 13.1 / 15.x` 兼容验证。
+- 构建本地卖家操作台，聚合 worker 在线状态、dry-run 安全态、Agent 模拟、价格决策、规则护栏、记忆与 Trace；增加可选 Bearer 鉴权、ready/live 探针、安全响应头和桌面/移动端响应式布局，浏览器实测无横向溢出，正文与主按钮对比度分别为 17.84:1、4.63:1。
+- 建立 `doctor / status / smoke / demo / replay / golden eval` 分层验证体系和 CI 门禁，覆盖模型故障降级、跨商品事实隔离、混合规格与报价路由、价格底线、规则承诺、Outbox 并发、API 请求回放、事件循环阻塞、状态陈旧、敏感字段污染和认证失败路径；当前 92 项 pytest、8 个场景 11 轮 golden eval 全部通过，并由 CI 持续验证 `websockets 13.1 / 15.x` 兼容性。
 
 **项目链接：** https://github.com/falses00/Falses-Goofish-GuardAgent
 
@@ -45,7 +46,7 @@ Falses Goofish GuardAgent：闲鱼二手交易 AI 客服与议价安全 Agent
 
 ### 技术栈
 
-Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、pytest、Rich CLI、Prompt Engineering、Agent Routing、Guardrails、RAG-lite、Agent Evaluation、Observability
+Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、HTML/CSS/JavaScript、pytest、Docker、GitHub Actions、Prompt Engineering、Agent Routing、Guardrails、RAG-lite、Agent Evaluation、Observability
 
 ### 简历 Bullet
 
@@ -63,14 +64,16 @@ Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、pytest、Rich CL
 - 修复跨商品事实污染：`TechAgent` 强制优先使用当前消息携带的商品上下文，仅在缺失结构化数据时使用演示知识库，并用对抗测试证明阿里云教程不会混入 iPad 屏幕/电池信息。
 - 建立模型故障隔离层，将超时、空响应和 provider 异常降级为可发送的确定性安全回复；议价降级仍引用代码计算价格，Trace 记录 `model_fallback` 与错误类型，避免 LLM 故障拖垮 WebSocket 消费循环。
 - 新增 `AgentTrace` 可观测机制，记录每轮决策的意图、路由 Agent、议价次数、启用护栏、定价来源、价格决策和知识命中结果，支持 CLI 面板展示与日志排查。
-- 将 Agent core 服务化为 FastAPI backend，提供 `/api/reply`、`/api/traces` 与 `/health` 接口，返回结构化回复、意图、trace 和 memory snapshot，支持 Web 管理台、移动端自动化桥接或 MCP server 复用同一套决策能力。
-- 设计 `JsonlTraceStore` 追加式 trace 存储，保存每轮 Agent 决策快照，支持最近 trace 回查、离线 replay 和线上问题定位。
+- 将 Agent core 服务化为 FastAPI backend，提供 typed reply、memory、trace、runtime status 与 readiness 接口；通过可选 Bearer 鉴权、请求关联 ID、安全响应头和单 worker 并发锁保护本地运营面，支持 Web 管理台、移动端自动化桥接或 MCP server 复用同一套决策能力。
+- 设计 `JsonlTraceStore` 追加式 trace 存储与 SQLite WAL 记忆层，增加跨进程文件锁、锁等待、容量上限和滚动归档；双进程对抗测试验证 80 次并发追加在滚动期间无崩溃、无丢失。
+- 为 API `request_id` 设计 owner token、自动续租和 fencing 机制，避免慢模型超过租约后被第二实例重复执行；两实例对抗测试验证 1 秒租约、2.2 秒模型调用仅写入一轮记忆和一条 Trace。
+- 构建无外部 CDN 的响应式卖家操作台，把 worker 状态、安全模拟、路由、报价、护栏、记忆和 Trace 组织为一个可操作界面；默认不落记忆、不发送闲鱼消息，令牌只保存在浏览器会话级存储。
 - 构建本地 Mock CLI 调试模式，无需真实闲鱼 Cookie 即可模拟买家咨询和砍价，提升项目演示、策略调参和回归验证效率。
 - 使用 pytest 覆盖议价边界、历史承诺不抬价、商品级底价优先、无效折扣回退、规格数字误判报价、RAG 命中/未命中、SQLite 单调记忆、API 结构化响应和空消息 422 失败路径等核心路径。
 - 新增 `python main.py --mode smoke` 离线端到端自检，使用内置 LLM stub 真实穿过入口、路由、Agent、SQLite 记忆、Trace 和回复生成链路，降低回归验证对真实 Cookie/API Key 的依赖。
 - 新增 `python main.py --mode replay` 实时执行链离线回放，复用挂机模式的消息处理与 Outbox 代码，验证 dry-run 零网络副作用、重复事件抑制、发送失败重试和记忆一致性。
 - 构建离线 Agent 评测 harness，将真实交易对话抽象为黄金评测集，基于 trace-level 断言评估意图路由、RAG 命中、护栏触发、价格决策和最终记忆状态，并接入 GitHub Actions 作为 CI 质量门禁。
-- 修复容器交付链路，Compose 改为构建当前仓库镜像并完整打包 `core / api / prompts / data`；新增无密钥泄露的 doctor fail-fast 检查，并在 CI 中加入 Docker image build，避免部署继续运行上游旧代码。
+- 修复容器交付链路，Compose 拆分真实 worker 与本地 console，镜像以固定非 root UID 运行；CI 除构建镜像外还启动容器验证 `/health/ready` 与控制台首页，避免“镜像能构建但服务起不来”。
 - 将 Cookie 过期与平台风控从 `input / sys.exit / 递归重试` 改为 typed authentication error；非交互容器停止 WebSocket/token 任务并快速退出，避免无人值守部署挂死或持续请求放大风控。
 
 ## 面试讲述版本
@@ -92,7 +95,7 @@ Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、pytest、Rich CL
 如果需要放在简历里更偏结果，可以写：
 
 - 将原项目从单一自动回复改造为 4 类 Agent 协同链路，补齐价格护栏、商品事实约束、会话记忆、服务接口、trace 回放和本地调试能力。
-- 为核心决策路径补充 50+ 个单元 / API 测试，覆盖正常路径、边界值、错误配置、对抗输入、动态 Agent 注册、模型超时降级、跨商品事实隔离、消息聚合状态机、真人化回复、Outbox 并发 claim / 失败恢复 / 租约回收、规则护栏、交付决策和 HTTP 失败路径。
+- 为核心决策路径建立 92 项单元 / API 回归测试，覆盖正常路径、边界值、错误配置、对抗输入、动态 Agent 注册、模型超时降级、跨商品事实隔离、消息聚合状态机、真人化回复、Outbox/API 请求并发 claim、续租 fencing、失败恢复、租约回收、跨进程存储竞争、规则护栏、交付决策和 HTTP 失败路径。
 - 将真实闲鱼挂机链路与本地 Mock 演示链路统一到同一套 Agent 决策核心，降低调试和演示对平台 Cookie 的依赖。
 - 基于黄金交易场景构建离线 Agent eval gate，检查 intent、routed agent、guardrails、RAG grounding、price decision 和 memory consistency，避免只用最终自然语言回复判断质量。
 

@@ -140,6 +140,29 @@ def test_price_agent_fallback_preserves_guardrail_price(tmp_path):
     assert "model_fallback" in bot.last_trace.guardrails
 
 
+def test_agent_trace_records_stage_timings(tmp_path):
+    bot = build_failing_bot(tmp_path)
+
+    bot.generate_reply(
+        "电池健康多少？",
+        "当前商品的信息如下：标题:iPad 价格:4299元",
+        context=[],
+        chat_id="chat_timing",
+        item_id="item_timing",
+    )
+
+    timings = bot.last_trace.timings_ms
+    assert set(timings) == {
+        "policy_context",
+        "routing",
+        "agent_generate",
+        "guardrails_style",
+        "total",
+    }
+    assert all(value >= 0 for value in timings.values())
+    assert timings["total"] >= timings["routing"]
+
+
 def test_tech_agent_never_leaks_demo_product_facts_into_another_item(tmp_path):
     bot = build_failing_bot(tmp_path)
     item_desc = (

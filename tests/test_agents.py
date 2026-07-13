@@ -128,6 +128,34 @@ def test_offer_extraction_ignores_storage_numbers():
     assert offer == 3000
 
 
+def test_router_prefers_explicit_offer_over_storage_spec():
+    router = IntentRouter(classify_agent=None)
+
+    intent = router.detect("128G 的话，3000 元能出吗", item_desc="", context="")
+
+    assert intent == "price"
+
+
+def test_faq_expert_extracts_storage_and_battery_facts():
+    expert = FAQExpert({
+        "specs": {
+            "model": "iPad Pro M2",
+            "storage": "128GB",
+            "network": "WiFi版",
+            "color": "深空灰色",
+            "battery_health": "93%",
+            "charge_cycles": 184,
+        }
+    })
+
+    context = expert.extract_related_kb("128GB 版本吗，电池健康和循环次数多少？")
+
+    assert "iPad Pro M2" in context
+    assert "128GB" in context
+    assert "93%" in context
+    assert "184" in context
+
+
 def test_price_router_detects_bare_number_offer():
     """真实买家常说 '4100 可以马上拍'，不能漏到 default。"""
     router = IntentRouter(classify_agent=None)

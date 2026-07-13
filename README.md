@@ -105,21 +105,27 @@ $env:API_OFFLINE_MODE="true"
 uvicorn api.app:app --host 127.0.0.1 --port 8000
 ```
 
-服务化入口会复用同一套 `XianyuReplyBot` 决策核心，适合做后台管理台、移动端自动化桥接、外部评测器或 MCP server 的上游能力。
+服务化入口会复用同一套 `XianyuReplyBot` 决策核心，并在根路径提供本地卖家操作台。浏览器打开 `http://127.0.0.1:8000/`，可以查看真实 Worker 心跳与 dry-run 状态、安全模拟买家消息、检查价格护栏、记忆和最近 Trace。控制台的模拟回复不会调用闲鱼发送接口。
 
 核心接口：
 
 - `GET /health`：健康检查，并返回是否处于离线 deterministic LLM 模式。
+- `GET /health/live`：进程存活探针；`GET /health/ready`：检查 Agent、存储目录和控制台资源。
+- `GET /api/overview`：返回无敏感正文的 API、Worker、Agent 与 Trace 摘要。
+- `GET /api/runtime-status`：返回 live worker 的原子运行快照。
 - `GET /api/capabilities`：列出当前已注册的业务意图，便于管理台或 MCP 动态发现能力。
-- `POST /api/reply`：输入买家消息、商品信息和会话 ID，返回回复、意图、trace 和 memory snapshot。
-- `GET /api/traces?limit=20`：读取最近的 JSONL trace，便于排查和回放。
+- `POST /api/reply`：输入买家消息、商品信息和会话 ID，返回回复、意图、trace 和 memory snapshot；可带 `request_id` 获得完成态请求回放保护。
+- `GET /api/memory/{chat_id}`：查询指定会话的本地记忆与议价承诺。
+- `GET /api/traces?limit=20&chat_id=...&intent=...`：过滤最近的 JSONL trace，便于排查和回放。
+
+API 默认只建议绑定 `127.0.0.1`。设置 `API_ACCESS_TOKEN` 后，回复、记忆和 Trace 接口要求 `Authorization: Bearer <token>`；控制台令牌只保存在当前标签页的 `sessionStorage`。生产环境可设置 `API_DOCS_ENABLED=false` 关闭 Swagger/ReDoc。由于决策核心仍包含兼容旧调用方的可变 Trace 状态，API 部署固定使用单 worker，由进程内锁保证请求隔离；横向扩展前应先把决策结果重构为不可变返回值。
 
 示例：
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/reply ^
   -H "Content-Type: application/json" ^
-  -d "{\"chat_id\":\"demo_api\",\"item_id\":\"ipad\",\"user_msg\":\"3000 元能出吗\"}"
+  -d "{\"request_id\":\"demo-api-001\",\"chat_id\":\"demo_api\",\"item_id\":\"ipad\",\"user_msg\":\"3000 元能出吗\"}"
 ```
 
 ### 8. 连续消息聚合
@@ -192,10 +198,25 @@ bot.register_agent(
 
 `TechAgent` 现在严格以当前 `item_id` 对应的消息商品上下文为事实源，只有调用方没有提供结构化商品数据时才读取演示 JSON，防止不同商品之间串用 iPad 等示例参数。
 
+### 13. API 并发边界与请求回放
+
+FastAPI 会在工作线程中并发执行同步端点，而兼容旧调用方式的 `XianyuReplyBot` 暴露了可变的 `last_intent / last_trace`。服务层使用显式决策锁把“读取上下文 -> Agent 决策 -> 写入完整 turn -> 固化 trace”收束成一个边界，避免并发请求互相串用意图或 trace。
+
+调用方可提供 1-128 字符的 `request_id`：
+
+- 首次请求原子领取带 owner token 的处理租约，慢模型调用期间自动续租；完成、失败和副作用前都校验所有权，旧 owner 会被 fencing token 拒绝。
+- 相同 `request_id` 和相同载荷重试时直接回放完成态响应，`idempotent_replay=true`，不会再次调用 Agent、追加记忆或写 trace。
+- 相同 `request_id` 携带不同载荷返回 HTTP `409 request_id_payload_mismatch`。
+- 仍在处理且持续续租的重复请求返回 HTTP `409 request_id_in_progress`；进程失败或租约真正超时后才允许新 owner 重新领取。
+
+该机制解决正常网关重试和多 worker 同时收到重复请求的问题，但不会伪装成跨数据库 exactly-once：会话 turn 与回放记录不在同一 SQLite 事务中，进程若恰好在写入记忆后、固化完成态响应前崩溃，租约恢复仍可能重复执行。进一步收敛需要统一事务存储、上游业务幂等键或事务消息。
+
 ## 项目结构
 
 ```text
 Falses-Goofish-GuardAgent/
+├── PRODUCT.md                  # 操作台用户、任务、产品气质与反例
+├── DESIGN.md                   # 可复用视觉 token、组件和响应式规则
 ├── main.py                     # 启动入口：xianyu / cli / smoke / demo / replay / doctor / status
 ├── XianyuAgent.py              # 意图路由、价格 Agent、详情 Agent、默认 Agent
 ├── XianyuApis.py               # 闲鱼 / Goofish API 与 WebSocket 封装
@@ -203,6 +224,7 @@ Falses-Goofish-GuardAgent/
 ├── core/
 │   ├── __init__.py
 │   ├── agent_registry.py       # 可插拔 Agent 注册、解析与回退契约
+│   ├── api_request_replay.py   # API 请求领取、冲突检测与完成态响应回放
 │   ├── experts.py              # BargainExpert 与 FAQExpert
 │   ├── human_style.py          # 真人卖家回复风格约束与机器腔清洗
 │   ├── message_aggregation.py  # 连续买家消息 debounce 聚合
@@ -215,7 +237,8 @@ Falses-Goofish-GuardAgent/
 │   └── trace_store.py          # JSONL trace 持久化与回放
 ├── api/
 │   ├── __init__.py
-│   └── app.py                  # FastAPI Agent backend
+│   ├── app.py                  # FastAPI Agent backend、认证与健康探针
+│   └── static/                 # 本地卖家操作台 HTML / CSS / JavaScript
 ├── data/
 │   ├── product_info.json       # 示例商品知识库
 │   ├── product_rules.json      # 商品承诺、售后和发货规则
@@ -234,7 +257,9 @@ Falses-Goofish-GuardAgent/
 │   ├── test_product_rules.py   # 规则中心与交付决策测试
 │   ├── test_human_style.py     # 真人化回复风格测试
 │   ├── test_reply_outbox.py    # 回复执行 Outbox 去重与重试测试
-│   └── test_api.py             # HTTP API 与失败路径测试
+│   ├── test_api_request_replay.py # 请求回放状态机、冲突与租约测试
+│   ├── test_api.py             # HTTP API、控制台、认证与失败路径测试
+│   └── test_storage_hardening.py # WAL、busy timeout、跨进程 Trace 滚动与损坏恢复
 ├── .env.example                # 配置模板
 ├── requirements.txt
 └── docker-compose.yml
@@ -328,10 +353,10 @@ python main.py --mode demo
 
 ```bash
 $env:API_OFFLINE_MODE="true"
-uvicorn api.app:app --host 127.0.0.1 --port 8000
+uvicorn api.app:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-浏览器打开 `http://127.0.0.1:8000/docs` 可以直接调试接口。离线模式适合演示和 CI；真实模型模式默认需要配置 `AGNES_API_KEY`，也可通过 `API_KEY`、`MODEL_BASE_URL` 和 `MODEL_NAME` 接入其它 OpenAI-compatible 服务。
+浏览器打开 `http://127.0.0.1:8000/` 使用卖家操作台，打开 `/docs` 调试 API。页面默认不写入本地记忆，生成的回复也不会发送到闲鱼；勾选“写入本地对话记忆”只影响 API 演示数据库。离线模式适合演示和 CI；真实模型模式默认需要配置 `AGNES_API_KEY`，也可通过 `API_KEY`、`MODEL_BASE_URL` 和 `MODEL_NAME` 接入其它 OpenAI-compatible 服务。
 
 ### 5. 闲鱼挂机运行
 
@@ -368,12 +393,12 @@ docker compose up -d
 docker compose ps
 ```
 
-Compose 现在构建当前仓库的 `Dockerfile`，镜像包含 `core/`、`api/`、提示词和 JSON 规则，不再拉取上游 `shaxiu/xianyuautoagent:latest`。健康检查使用 `doctor` 验证容器配置；首次部署可先从 `.env.example` 创建自己的 `.env`。
+Compose 构建当前仓库镜像，并以非 root 用户运行两个独立服务：`guardagent` 负责真实闲鱼 WebSocket，`console` 负责单 worker FastAPI 与卖家操作台。控制台只映射到宿主机 `127.0.0.1:8000`，端口冲突时可设置 `CONSOLE_BIND_PORT`；worker 使用 `status` 检查连接与心跳，控制台使用 `/health/ready` 检查 Agent、存储和静态资源。健康检查由 Compose 按实际进程分别配置，直接覆盖镜像启动命令时应同步传入对应探针。首次部署可先从 `.env.example` 创建自己的 `.env`，Linux bind mount 需确保容器 UID `10001` 对 `data/` 与 `logs/` 有写权限。
 
 ## 自动化测试
 
 ```bash
-pytest tests/test_agents.py tests/test_agent_runtime.py tests/test_message_aggregation.py tests/test_product_rules.py tests/test_human_style.py tests/test_reply_outbox.py tests/test_live_reply_execution.py tests/test_api.py -q
+pytest -q
 python main.py --mode smoke
 python main.py --mode replay
 python tools/run_agent_eval.py --min-score 1.0
@@ -388,15 +413,18 @@ python tools/run_agent_eval.py --min-score 1.0
 - 历史承诺价不被抬高。
 - 商品级 `min_price` 优先于环境折扣。
 - 无效折扣配置自动回退。
+- API 共享 Agent 的并发决策隔离。
+- `request_id` 完成态回放、载荷冲突、owner fencing、慢请求续租、失败恢复与租约回收。
+- `websockets 13.1 / 15.x` 客户端参数和重连路径兼容性。
 - 规格数字不误判成买家报价。
 - 原子写入一轮对话记忆，避免半轮上下文。
 - 连续买家消息 debounce 聚合，避免多条短消息触发多次错误回复。
 - 商品规则中心，拦截违规承诺并按订单状态判断是否可自动交付。
 - 真人化回复风格层，拦截和改写机器腔、客服腔、长段落和列表式回复。
 - 回复执行 Outbox，防止同一条买家事件因重连或重复同步被重复发送。
-- FastAPI `/api/reply` 服务接口、memory snapshot、trace JSONL 回查。
+- FastAPI `/api/reply` 服务接口、memory snapshot、trace JSONL 回查与决策阶段耗时。
 - 空消息等非法输入返回 422，避免脏请求进入 Agent 决策链路。
-- 离线 Agent 评测集，覆盖意图路由、RAG 命中、护栏触发、价格决策和最终记忆状态。
+- 8 个场景 11 轮离线 Agent 评测集，覆盖意图路由、商品事实命中、混合规格与报价、护栏触发、价格决策和最终记忆状态。
 - 商品知识库关键词命中。
 - 当前商品事实优先，禁止跨商品串用演示知识库。
 - 动态 Agent 注册、优先级路由与 Prompt 重载保留。
@@ -413,7 +441,7 @@ python tools/run_agent_eval.py --min-score 1.0
 - `api/app.py`：服务化接口复用同一套 Agent core，方便外部系统集成和自动化验证。
 - `.github/workflows/ci.yml`：CI 自动跑单测、编译、doctor、runtime smoke、agent eval gate 和当前仓库镜像构建。
 
-评测会检查 `intent`、`routed_agent`、`guardrails`、`knowledge.matched`、`price_decision.action`、`buyer_offer`、`calculated_price`、`bargain_count`、`lowest_price_committed` 和 `buyer_highest_offer`，避免项目退化成只看最终回复的 demo。
+评测会检查 `intent`、`routed_agent`、`guardrails`、`knowledge.matched`、`price_decision.action`、`buyer_offer`、`calculated_price`、回复包含/排除词、规则安全状态、`bargain_count`、`lowest_price_committed` 和 `buyer_highest_offer`，避免项目退化成只看最终回复的 demo。当前 golden set 为 8 个场景 11 轮；它是确定性回归门禁，不替代线上模型质量评估。
 
 ## 简历项目经历
 
@@ -446,7 +474,16 @@ python tools/run_agent_eval.py --min-score 1.0
 | `MESSAGE_AGGREGATION_MAX_CHARS` | 单批最多字符数，达到后立即触发 |
 | `API_OFFLINE_MODE` | API 服务是否使用离线 deterministic LLM，演示 / CI 可设为 `true` |
 | `API_CHAT_DB_PATH` | API 服务使用的 SQLite 会话数据库路径 |
+| `API_ACCESS_TOKEN` | 可选 Bearer 访问令牌；设置后保护回复、记忆和 Trace 接口 |
+| `API_DOCS_ENABLED` | 是否开放 Swagger/ReDoc，默认 `true` |
 | `AGENT_TRACE_PATH` | API 服务写入的 JSONL trace 文件路径 |
+| `AGENT_TRACE_MAX_BYTES` | 单个 Trace 文件上限，默认 10 MiB |
+| `AGENT_TRACE_BACKUP_COUNT` | Trace 滚动副本数量，默认 3 |
+| `SQLITE_BUSY_TIMEOUT_MS` | SQLite 锁等待时间，默认 30000 毫秒 |
+| `API_REQUEST_REPLAY_DB_PATH` | API 完成态响应回放数据库，默认 `data/api_request_replay.db` |
+| `API_REQUEST_REPLAY_LEASE_SECONDS` | 请求处理中租约秒数，默认 `60`；失败或超时后允许恢复 |
+| `RUNTIME_STATUS_PATH` | live worker 无密钥状态快照路径，默认 `logs/runtime_status.json` |
+| `RUNTIME_STATUS_STALE_SECONDS` | 状态快照陈旧阈值，默认 `45` 秒 |
 | `TOGGLE_KEYWORDS` | 人工接管切换关键词，默认 `。` |
 | `SIMULATE_HUMAN_TYPING` | 是否模拟真人输入延迟 |
 | `LOG_LEVEL` | 日志级别 |
@@ -455,7 +492,7 @@ python tools/run_agent_eval.py --min-score 1.0
 
 这次改造吸收了同类项目的几个方向，但保持当前仓库轻量：
 
-- `xianyu-auto-reply` 类项目的多账号、自动发货、后台监控思路，后续可作为 Web 管理后台方向。
+- `xianyu-auto-reply` 类项目的多账号、自动发货和人工接管队列思路，可作为现有卖家操作台的后续扩展方向。
 - 本地控制台类项目的商品专属策略、Ollama 兼容、本地长期托管思路。
 - `XianyuBot` 类项目的分层架构、多专家协同和 RAG 规划。
 - `XianYuApis` 的闲鱼 API / WebSocket 底座思路。

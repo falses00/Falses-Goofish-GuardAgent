@@ -18,8 +18,36 @@ services:
       - ./prompts:/app/prompts
       - ./logs:/app/logs
     healthcheck:
-      test: ["CMD", "python", "main.py", "--mode", "doctor"]
+      test: ["CMD", "python", "main.py", "--mode", "status"]
       interval: 30s
       timeout: 10s
       start_period: 20s
+      retries: 3
+
+  console:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: falses-goofish-guardagent:local
+    container_name: falses-goofish-guardagent-console
+    restart: "on-failure:5"
+    command: ["uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: Asia/Shanghai
+      NON_INTERACTIVE: "true"
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "127.0.0.1:${CONSOLE_BIND_PORT:-8000}:8000"
+    volumes:
+      - ./data:/app/data
+      - ./prompts:/app/prompts:ro
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
       retries: 3

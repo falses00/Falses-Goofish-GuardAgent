@@ -14,5 +14,7 @@ images/
 backups/
 .DS_Store
 .vscode/
+.playwright-cli/
+.impeccable/
 tests/
 docs/

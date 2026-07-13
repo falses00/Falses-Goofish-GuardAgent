@@ -144,7 +144,12 @@ class AgentEvaluator:
             "lowest_price_committed": snapshot.lowest_price_committed,
             "buyer_highest_offer": snapshot.buyer_highest_offer,
         }
-        failures = self._evaluate_final(case.get("final_expect", {}), final_snapshot)
+        turn_failures = [
+            f"turn {turn.turn_index + 1}: {failure}"
+            for turn in turn_results
+            for failure in turn.failures
+        ]
+        failures = turn_failures + self._evaluate_final(case.get("final_expect", {}), final_snapshot)
         return CaseEvalResult(
             case_id=case_id,
             passed=all(turn.passed for turn in turn_results) and not failures,
@@ -199,6 +204,21 @@ class AgentEvaluator:
             min_price = price_decision.get("min_price")
             if calculated_price is not None and min_price is not None and calculated_price < min_price:
                 failures.append(f"calculated_price {calculated_price} below min_price {min_price}")
+
+        for expected_text in expect.get("reply_contains", []):
+            if expected_text not in reply:
+                failures.append(f"reply missing expected text {expected_text!r}")
+
+        for forbidden_text in expect.get("reply_not_contains", []):
+            if forbidden_text in reply:
+                failures.append(f"reply contains forbidden text {forbidden_text!r}")
+
+        if "rule_safe" in expect:
+            actual_rule_safe = trace.get("rules", {}).get("safe")
+            if actual_rule_safe is not expect["rule_safe"]:
+                failures.append(
+                    f"rule safe expected {expect['rule_safe']}, got {actual_rule_safe}"
+                )
 
         return TurnEvalResult(
             case_id=case_id,
