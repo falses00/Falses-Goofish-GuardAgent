@@ -1,412 +1,352 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="color-scheme" content="light">
-    <meta name="description" content="本地优先的闲鱼卖家 Agent 操作台">
-    <title>闲鱼卖家 Agent 操作台</title>
+    <meta name="color-scheme" content="light dark">
+    <meta name="description" content="Falses Goofish GuardAgent 本地运营控制台">
+    <title>GuardAgent Console</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/static/styles.css?v=20260717.4">
-    <script src="/static/app.js?v=20260717.4" defer></script>
+    <link rel="stylesheet" href="/static/styles.css?v=20260718.3">
+    <script src="/static/app.js?v=20260718.3" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">跳到主要内容</a>
 
-    <div class="app-layout">
-      <aside class="app-sidebar" aria-label="操作台导航">
-        <div class="sidebar-brand">
-          <span class="brand-mark" aria-hidden="true">FG</span>
-          <div>
-            <strong>GuardAgent</strong>
-            <span>闲鱼卖家操作台</span>
-            <span class="sr-only">Falses Goofish GuardAgent</span>
-          </div>
+    <div class="mobile-nav-backdrop" id="mobileNavBackdrop" hidden></div>
+
+    <div class="app-shell">
+      <aside class="app-sidebar" id="appSidebar" aria-label="操作台导航">
+        <div class="sidebar-topline">
+          <a class="brand-lockup" href="#dashboard" aria-label="返回运营总览">
+            <span class="brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 24 24" role="img">
+                <path d="M13 2 4.5 13h6L9 22l10.5-13h-6L13 2Z"></path>
+              </svg>
+            </span>
+            <span class="brand-copy">
+              <strong>GuardAgent</strong>
+              <small>Falses Goofish</small>
+              <span class="sr-only">Falses Goofish GuardAgent</span>
+            </span>
+          </a>
+          <button class="icon-button sidebar-close" id="closeSidebarButton" type="button" aria-label="关闭导航">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"></path></svg>
+          </button>
         </div>
 
         <nav class="sidebar-nav" aria-label="主要功能">
-          <button class="nav-item" type="button" data-view="workbench" aria-current="page">
-            <span>回复工作台</span>
-            <small>安全试跑</small>
+          <p class="nav-label">运营</p>
+          <button class="nav-item" type="button" data-view="dashboard" aria-current="page">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg>
+            <span>运营总览</span>
+            <small id="sidebarOverviewState">实时</small>
           </button>
+          <button class="nav-item" type="button" data-view="workbench">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H7l-3 3V5Z"></path><path d="M8 9h8M8 12h5"></path></svg>
+            <span>回复试跑</span>
+            <small>Dry-run</small>
+          </button>
+
+          <p class="nav-label">审计</p>
           <button class="nav-item" type="button" data-view="traces">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"></path><circle cx="18" cy="18" r="2"></circle></svg>
             <span>决策记录</span>
             <small id="sidebarTraceCount">读取中</small>
           </button>
           <button class="nav-item" type="button" data-view="runtime">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2-5 4 10 2-5h6"></path></svg>
             <span>运行状态</span>
             <small id="sidebarRuntimeState">检查中</small>
           </button>
         </nav>
 
-        <div class="sidebar-note">
-          <strong>本地优先</strong>
-          <span>页面数据来自当前 API、Worker 快照与 Trace。</span>
-        </div>
+        <section class="sidebar-status" aria-label="当前运行摘要">
+          <div class="sidebar-status-heading">
+            <span>运行环境</span>
+            <span class="live-dot" aria-hidden="true"></span>
+          </div>
+          <strong>本地安全模式</strong>
+          <p>操作台只生成与审计回复，不会直接触达买家。</p>
+        </section>
+
+        <p class="sidebar-version">Console v2 · Local first</p>
       </aside>
 
-      <div class="app-canvas">
-        <header class="app-header">
-          <div class="header-inner">
-            <div class="page-context">
-              <p class="product-kicker" id="pageEyebrow">安全试跑</p>
-              <h1 id="pageTitle" tabindex="-1">回复工作台</h1>
-            </div>
+      <div class="app-workspace" id="appWorkspace">
+        <header class="topbar">
+          <button class="icon-button mobile-menu-button" id="mobileNavButton" type="button" aria-label="打开导航" aria-controls="appSidebar" aria-expanded="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"></path></svg>
+          </button>
 
-            <div class="header-operations">
-              <ul class="service-status" aria-label="服务状态">
-                <li class="status-item" id="apiStatus" data-tone="loading">
-                  <span class="status-dot" aria-hidden="true"></span>
-                  <span>
-                    <span class="status-label">API</span>
-                    <strong class="status-value">检查中</strong>
-                  </span>
-                </li>
-                <li class="status-item" id="workerStatus" data-tone="loading">
-                  <span class="status-dot" aria-hidden="true"></span>
-                  <span>
-                    <span class="status-label">闲鱼 Worker</span>
-                    <strong class="status-value">检查中</strong>
-                  </span>
-                </li>
-                <li class="status-item" id="modeStatus" data-tone="loading">
-                  <span class="status-dot" aria-hidden="true"></span>
-                  <span>
-                    <span class="status-label">发送模式</span>
-                    <strong class="status-value">检查中</strong>
-                  </span>
-                </li>
-              </ul>
+          <div class="global-search">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
+            <label class="sr-only" for="globalSearch">全局搜索</label>
+            <input id="globalSearch" type="search" placeholder="搜索消息、会话 ID、Agent 或护栏" autocomplete="off">
+            <kbd>/</kbd>
+          </div>
 
-              <div class="header-actions">
-                <button class="button button-secondary button-compact" id="refreshAllButton" type="button">
-                  刷新状态
-                </button>
-                <button class="button button-secondary button-compact" id="openTokenButton" type="button" aria-haspopup="dialog">
-                  访问令牌
-                  <span class="token-indicator" id="tokenIndicator" data-active="false" aria-hidden="true"></span>
-                </button>
-              </div>
-            </div>
+          <ul class="service-status" aria-label="服务状态">
+            <li class="status-item" id="apiStatus" data-tone="loading">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span><span class="status-label">API</span><strong class="status-value">检查中</strong></span>
+            </li>
+            <li class="status-item" id="workerStatus" data-tone="loading">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span><span class="status-label">Worker</span><strong class="status-value">检查中</strong></span>
+            </li>
+            <li class="status-item mode-status" id="modeStatus" data-tone="loading">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span><span class="status-label">模式</span><strong class="status-value">检查中</strong></span>
+            </li>
+          </ul>
+
+          <div class="topbar-actions">
+            <button class="icon-button" id="themeToggleButton" type="button" aria-label="切换深色模式" title="切换主题">
+              <svg class="theme-icon theme-icon-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
+              <svg class="theme-icon theme-icon-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.4A8.5 8.5 0 0 1 9.6 3.5a8.5 8.5 0 1 0 10.9 10.9Z"></path></svg>
+            </button>
+            <button class="icon-button" id="refreshAllButton" type="button" aria-label="刷新全部状态" title="刷新全部状态">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5M4 18v-5h5"></path><path d="M18.5 9A7 7 0 0 0 6.7 6.7L4 11M5.5 15A7 7 0 0 0 17.3 17.3L20 13"></path></svg>
+            </button>
+            <button class="account-button" id="openTokenButton" type="button" aria-haspopup="dialog">
+              <span class="account-avatar" aria-hidden="true">FA</span>
+              <span class="account-copy"><strong>本地管理员</strong><small>访问令牌</small></span>
+              <span class="token-indicator" id="tokenIndicator" data-active="false" aria-hidden="true"></span>
+            </button>
           </div>
         </header>
 
-        <main id="main-content" class="page-shell">
+        <main id="main-content" class="main-content" tabindex="-1">
           <div class="notice" id="globalNotice" role="status" aria-live="polite" hidden>
-            <div>
-              <strong id="globalNoticeTitle"></strong>
-              <p id="globalNoticeMessage"></p>
-            </div>
+            <span class="notice-icon" aria-hidden="true"></span>
+            <div><strong id="globalNoticeTitle"></strong><p id="globalNoticeMessage"></p></div>
             <button class="notice-dismiss" id="dismissNoticeButton" type="button" aria-label="关闭提示">关闭</button>
           </div>
 
+          <header class="page-header">
+            <div>
+              <p class="page-eyebrow" id="pageEyebrow">运营中心</p>
+              <h1 id="pageTitle" tabindex="-1">运营总览</h1>
+              <p class="page-description" id="pageDescription">查看 Agent 决策质量、运行风险与最近活动。</p>
+            </div>
+            <div class="page-header-actions">
+              <span class="updated-time" id="overviewUpdatedAt">正在读取运行快照</span>
+              <button class="button button-primary" type="button" data-action-view="workbench">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+                新建回复试跑
+              </button>
+            </div>
+          </header>
+
           <section class="runtime-alert" id="runtimeAlert" aria-live="polite" hidden>
+            <span class="runtime-alert-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M12 3 2.7 19h18.6L12 3Z"></path><path d="M12 9v4M12 17h.01"></path></svg>
+            </span>
             <div class="runtime-alert-copy">
               <span class="runtime-alert-label" id="runtimeAlertLabel">需要处理</span>
-              <div>
-                <strong id="runtimeAlertTitle"></strong>
-                <p id="runtimeAlertMessage"></p>
-              </div>
+              <strong id="runtimeAlertTitle"></strong>
+              <p id="runtimeAlertMessage"></p>
             </div>
-            <button class="button button-secondary button-compact" id="openRuntimeButton" type="button">查看运行状态</button>
+            <button class="button button-secondary button-compact" id="openRuntimeButton" type="button">查看处理步骤</button>
           </section>
 
-          <section class="workspace-view" id="view-workbench" data-workspace-view="workbench" aria-labelledby="workbenchViewTitle">
-            <div class="view-heading">
-              <div>
-                <h2 id="workbenchViewTitle">先试跑，再决定是否交给 Worker</h2>
-                <p>输入真实买家问题，检查回复、价格护栏、商品事实和本地记忆。此处永远不会发送消息。</p>
-              </div>
-              <span class="safe-badge">Dry-run 工作区</span>
+          <section class="workspace-view dashboard-view" id="view-dashboard" data-workspace-view="dashboard" aria-labelledby="dashboardTitle">
+            <h2 class="sr-only" id="dashboardTitle">Agent 运营总览</h2>
+
+            <div class="metric-grid" id="metricGrid" aria-live="polite" aria-busy="true">
+              <article class="metric-card metric-card-blue">
+                <div class="metric-card-top"><span class="metric-label">Worker 状态</span><span class="metric-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2-5 4 10 2-5h6"></path></svg></span></div>
+                <strong class="metric-value skeleton-text" id="workerMetric">读取中</strong>
+                <span class="metric-note" id="workerMetricNote">等待运行快照</span>
+              </article>
+              <article class="metric-card metric-card-green">
+                <div class="metric-card-top"><span class="metric-label">最近决策</span><span class="metric-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"></path></svg></span></div>
+                <strong class="metric-value skeleton-text" id="traceMetric">读取中</strong>
+                <span class="metric-note" id="traceMetricNote">最近 50 条采样</span>
+              </article>
+              <article class="metric-card metric-card-orange">
+                <div class="metric-card-top"><span class="metric-label">护栏 / 降级</span><span class="metric-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 6v5c0 5 3.4 8.3 8 10 4.6-1.7 8-5 8-10V6l-8-3Z"></path><path d="m9 12 2 2 4-4"></path></svg></span></div>
+                <strong class="metric-value skeleton-text" id="guardrailMetric">读取中</strong>
+                <span class="metric-note" id="guardrailMetricNote">来自真实 Trace</span>
+              </article>
+              <article class="metric-card metric-card-purple">
+                <div class="metric-card-top"><span class="metric-label">最近心跳</span><span class="metric-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg></span></div>
+                <strong class="metric-value skeleton-text" id="heartbeatMetric">读取中</strong>
+                <span class="metric-note" id="heartbeatMetricNote">等待 Worker 上报</span>
+              </article>
             </div>
 
-            <div class="workbench">
-        <section class="panel simulator-panel" aria-labelledby="simulatorTitle">
-          <div class="panel-heading">
-            <div>
-              <p class="section-kicker">安全试跑</p>
-              <h2 id="simulatorTitle">模拟一条买家消息</h2>
+            <div class="dashboard-grid">
+              <section class="panel analytics-panel" aria-labelledby="analyticsTitle">
+                <div class="panel-heading">
+                  <div><p class="section-kicker">Decision intelligence</p><h2 id="analyticsTitle">决策质量</h2></div>
+                  <button class="text-button" type="button" data-action-view="traces">查看全部记录 <span aria-hidden="true">→</span></button>
+                </div>
+                <div class="analytics-summary">
+                  <article class="quality-score">
+                    <span class="quality-ring" id="dashboardSafeRate"><strong>0%</strong></span>
+                    <div><span class="metric-label">安全通过率</span><p id="dashboardSafeRateNote">等待 Trace 数据</p></div>
+                  </article>
+                  <div class="intent-distribution" id="dashboardIntentBars" aria-label="意图分布"></div>
+                </div>
+                <div class="dashboard-table-wrap">
+                  <table class="decision-table">
+                    <thead><tr><th>状态</th><th>买家消息</th><th>意图</th><th>Agent</th><th>时间</th></tr></thead>
+                    <tbody id="dashboardTraceTable"><tr><td colspan="5" class="table-empty">正在读取最近决策</td></tr></tbody>
+                  </table>
+                </div>
+              </section>
+
+              <aside class="panel activity-panel" aria-labelledby="activityTitle">
+                <div class="panel-heading compact-heading">
+                  <div><p class="section-kicker">Recent activity</p><h2 id="activityTitle">最近动态</h2></div>
+                  <span class="live-indicator"><span></span> 最新</span>
+                </div>
+                <div class="activity-list" id="dashboardActivityList">
+                  <div class="activity-skeleton"></div><div class="activity-skeleton"></div><div class="activity-skeleton"></div>
+                </div>
+                <button class="panel-footer-action" type="button" data-action-view="traces">打开决策数据库 <span aria-hidden="true">→</span></button>
+              </aside>
+
+              <section class="panel focus-panel" aria-labelledby="focusTitle">
+                <div class="focus-copy">
+                  <span class="focus-status" id="dashboardFocusStatus">正在检查</span>
+                  <p class="section-kicker">Operational focus</p>
+                  <h2 id="focusTitle"><span id="dashboardFocusTitle">读取当前运行风险</span></h2>
+                  <p id="dashboardFocusMessage">操作台正在核对 Worker 快照与最近 Trace。</p>
+                </div>
+                <div class="focus-actions">
+                  <button class="button button-inverse" type="button" data-action-view="runtime">查看运行明细</button>
+                  <button class="button button-ghost-inverse" type="button" data-action-view="workbench">先做回复试跑</button>
+                </div>
+              </section>
+
+              <section class="panel quick-actions-panel" aria-labelledby="quickActionsTitle">
+                <div class="panel-heading compact-heading"><div><p class="section-kicker">Quick actions</p><h2 id="quickActionsTitle">快捷操作</h2></div></div>
+                <div class="quick-action-list">
+                  <button type="button" data-action-view="workbench"><span class="quick-action-icon blue"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H7l-3 3V5Z"></path></svg></span><span><strong>模拟买家消息</strong><small>验证回复、定价与事实</small></span><span aria-hidden="true">→</span></button>
+                  <button type="button" data-action-view="traces"><span class="quick-action-icon green"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"></path></svg></span><span><strong>审查 Agent Trace</strong><small>筛选护栏与模型降级</small></span><span aria-hidden="true">→</span></button>
+                  <button type="button" data-action-view="runtime"><span class="quick-action-icon orange"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2-5 4 10 2-5h6"></path></svg></span><span><strong>处理 Worker 异常</strong><small>查看心跳与恢复路径</small></span><span aria-hidden="true">→</span></button>
+                </div>
+              </section>
             </div>
-            <span class="safe-badge">不会真实发送</span>
-          </div>
+          </section>
 
-          <div class="safety-note">
-            <strong>只生成回复，不触达闲鱼买家。</strong>
-            <span>如勾选“写入本地记忆”，本次对话会保存到本机数据库。</span>
-          </div>
-
-          <form id="replyForm" novalidate>
-            <div class="field-group">
-              <label for="userMessage">买家消息</label>
-              <textarea id="userMessage" name="user_msg" rows="5" maxlength="2000" required placeholder="例如：3000 元能出吗？屏幕有划痕吗？" aria-describedby="userMessageHelp userMessageCount"></textarea>
-              <div class="field-meta">
-                <span id="userMessageHelp">必填，最多 2000 字</span>
-                <span id="userMessageCount">0 / 2000</span>
-              </div>
-              <p class="field-error" id="userMessageError" role="alert" hidden></p>
-            </div>
-
-            <details class="advanced-fields" id="advancedFields">
-              <summary>高级字段</summary>
-              <div class="advanced-body">
-                <div class="field-group">
-                  <label for="additionalMessages">连续消息</label>
-                  <textarea id="additionalMessages" name="additional_user_msgs" rows="3" placeholder="每行一条，最多 10 条"></textarea>
-                  <span class="field-hint">用于模拟买家连续发来的补充消息，每条最多 1000 字。</span>
+          <section class="workspace-view" id="view-workbench" data-workspace-view="workbench" aria-labelledby="workbenchViewTitle" hidden>
+            <h2 class="sr-only" id="workbenchViewTitle">回复试跑工作台</h2>
+            <div class="workbench-grid">
+              <section class="panel composer-panel" aria-labelledby="simulatorTitle">
+                <div class="panel-heading">
+                  <div><p class="section-kicker">Message composer</p><h2 id="simulatorTitle">构造买家消息</h2></div>
+                  <span class="safe-badge"><span></span>不会真实发送</span>
+                </div>
+                <div class="safety-note">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 6v5c0 5 3.4 8.3 8 10 4.6-1.7 8-5 8-10V6l-8-3Z"></path><path d="m9 12 2 2 4-4"></path></svg>
+                  <div><strong>本页面只调用本地 Agent 决策链。</strong><span>默认不写记忆，不触达闲鱼，不改变在线 Worker。</span></div>
                 </div>
 
-                <div class="form-grid">
-                  <div class="field-group field-span-2">
-                    <label for="requestId">请求 ID</label>
-                    <div class="input-action">
-                    <input id="requestId" name="request_id" maxlength="128" pattern="[A-Za-z0-9._:\-]+" autocomplete="off" aria-describedby="requestIdHelp">
-                      <button class="button button-secondary" id="generateRequestIdButton" type="button">生成</button>
+                <form id="replyForm" novalidate>
+                  <div class="field-group primary-message-field">
+                    <label for="userMessage">买家消息</label>
+                    <textarea id="userMessage" name="user_msg" rows="7" maxlength="2000" required placeholder="例如：3500 元可以吗？支持包邮吗？" aria-describedby="userMessageHelp userMessageCount"></textarea>
+                    <div class="field-meta"><span id="userMessageHelp">输入一条真实场景消息</span><span id="userMessageCount">0 / 2000</span></div>
+                    <p class="field-error" id="userMessageError" role="alert" hidden></p>
+                  </div>
+
+                  <details class="advanced-fields" id="advancedFields">
+                    <summary><span><strong>上下文与高级字段</strong><small>连续消息、幂等 ID、商品信息和会话记忆</small></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"></path></svg></summary>
+                    <div class="advanced-body">
+                      <div class="field-group">
+                        <label for="additionalMessages">连续消息</label>
+                        <textarea id="additionalMessages" name="additional_user_msgs" rows="3" placeholder="每行一条，最多 10 条"></textarea>
+                        <span class="field-hint">用于模拟买家连续补充，每条最多 1000 字。</span>
+                      </div>
+                      <div class="form-grid">
+                        <div class="field-group field-span-2">
+                          <label for="requestId">请求 ID</label>
+                          <div class="input-action"><input id="requestId" name="request_id" maxlength="128" pattern="[A-Za-z0-9._:\-]+" autocomplete="off" aria-describedby="requestIdHelp"><button class="button button-secondary" id="generateRequestIdButton" type="button">重新生成</button></div>
+                          <span class="field-hint" id="requestIdHelp">用于安全重试，相同 ID 只能对应相同内容。</span>
+                        </div>
+                        <div class="field-group"><label for="chatId">会话 ID</label><input id="chatId" name="chat_id" value="console_chat_001" maxlength="128" required></div>
+                        <div class="field-group"><label for="itemId">商品 ID</label><input id="itemId" name="item_id" value="console_item_001" maxlength="128" required></div>
+                        <div class="field-group"><label for="userId">买家 ID</label><input id="userId" name="user_id" value="console_buyer" maxlength="128" required></div>
+                        <div class="field-group"><label for="assistantId">卖家 ID</label><input id="assistantId" name="assistant_id" value="console_seller" maxlength="128" required></div>
+                      </div>
+                      <div class="field-group"><label for="itemInfo">商品信息 JSON</label><textarea class="code-input" id="itemInfo" name="item_info" rows="5" spellcheck="false" placeholder='{"title":"二手 iPad","original_price":4299,"min_price":3800}'></textarea><span class="field-hint">留空时使用服务端默认商品信息。</span><p class="field-error" id="itemInfoError" role="alert" hidden></p></div>
+                      <div class="field-group"><label for="conversationContext">对话上下文 JSON</label><textarea class="code-input" id="conversationContext" name="context" rows="5" spellcheck="false" placeholder='[{"role":"user","content":"还在吗"}]'></textarea><span class="field-hint">留空时读取该会话的本地记忆。</span><p class="field-error" id="contextError" role="alert" hidden></p></div>
+                      <label class="check-row" for="persistTurn"><input id="persistTurn" name="persist_turn" type="checkbox"><span><strong>写入本地对话记忆</strong><small>只影响本机数据库，不会发送到闲鱼。</small></span></label>
                     </div>
-                    <span class="field-hint" id="requestIdHelp">用于安全重试。相同 ID 只能对应相同内容。</span>
-                  </div>
+                  </details>
 
-                  <div class="field-group">
-                    <label for="chatId">会话 ID</label>
-                    <input id="chatId" name="chat_id" value="console_chat_001" maxlength="128" required>
+                  <div class="form-actions">
+                    <button class="button button-primary button-large" id="submitReplyButton" type="submit"><span class="button-label">运行 Agent 决策</span><span class="button-loading" hidden>正在生成...</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 14-7-4 14-3-6-7-1Z"></path></svg></button>
+                    <button class="button button-secondary" id="resetReplyButton" type="reset">清空</button>
                   </div>
-                  <div class="field-group">
-                    <label for="itemId">商品 ID</label>
-                    <input id="itemId" name="item_id" value="console_item_001" maxlength="128" required>
-                  </div>
-                  <div class="field-group">
-                    <label for="userId">买家 ID</label>
-                    <input id="userId" name="user_id" value="console_buyer" maxlength="128" required>
-                  </div>
-                  <div class="field-group">
-                    <label for="assistantId">卖家 ID</label>
-                    <input id="assistantId" name="assistant_id" value="console_seller" maxlength="128" required>
-                  </div>
+                  <div class="form-feedback" id="replyFeedback" aria-live="assertive" hidden></div>
+                </form>
+              </section>
+
+              <section class="panel result-panel" aria-labelledby="resultTitle" aria-live="polite" aria-busy="false">
+                <div class="panel-heading result-heading">
+                  <div><p class="section-kicker">Agent output</p><h2 id="resultTitle">决策检查器</h2></div>
+                  <div class="result-actions"><button class="button button-secondary button-compact" id="openLatestTraceButton" type="button" hidden>打开 Trace</button><button class="button button-secondary button-compact" id="copyReplyButton" type="button" hidden>复制回复</button></div>
                 </div>
-
-                <div class="field-group">
-                  <label for="itemInfo">商品信息 JSON</label>
-                  <textarea class="code-input" id="itemInfo" name="item_info" rows="5" spellcheck="false" placeholder='{"title":"二手 iPad","original_price":4299,"min_price":3800}'></textarea>
-                  <span class="field-hint">留空时使用服务端默认商品信息。</span>
-                  <p class="field-error" id="itemInfoError" role="alert" hidden></p>
+                <div class="empty-state result-empty" id="resultEmpty"><span class="empty-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H7l-3 3V5Z"></path><path d="M8 9h8M8 12h5"></path></svg></span><strong>等待一次 Agent 决策</strong><p>生成后将在这里检查回复、意图路由、价格护栏、知识来源和本地记忆。</p></div>
+                <div class="result-loading" id="resultLoading" hidden aria-hidden="true"><div class="skeleton-line skeleton-line-short"></div><div class="skeleton-line"></div><div class="skeleton-line"></div><div class="skeleton-block"></div></div>
+                <div class="result-content" id="resultContent" hidden>
+                  <section class="result-block reply-block" aria-labelledby="replyOutputTitle"><div class="result-block-heading"><h3 id="replyOutputTitle">建议回复</h3><div class="badge-row" id="resultBadges"></div></div><blockquote id="replyOutput"></blockquote><p class="result-note" id="replayNote" hidden></p></section>
+                  <div class="result-data-grid">
+                    <section class="result-block" aria-labelledby="decisionOutputTitle"><h3 id="decisionOutputTitle">意图与路由</h3><dl class="data-list" id="decisionOutput"></dl></section>
+                    <section class="result-block" aria-labelledby="priceOutputTitle"><h3 id="priceOutputTitle">价格决策</h3><div id="priceOutput"></div></section>
+                    <section class="result-block" aria-labelledby="knowledgeOutputTitle"><h3 id="knowledgeOutputTitle">知识命中</h3><div id="knowledgeOutput"></div></section>
+                    <section class="result-block" aria-labelledby="memoryOutputTitle"><h3 id="memoryOutputTitle">本地记忆</h3><div id="memoryOutput"></div></section>
+                  </div>
+                  <details class="raw-details"><summary>原始 API 响应</summary><pre id="rawReplyOutput"></pre></details>
                 </div>
-
-                <div class="field-group">
-                  <label for="conversationContext">对话上下文 JSON</label>
-                  <textarea class="code-input" id="conversationContext" name="context" rows="5" spellcheck="false" placeholder='[{"role":"user","content":"还在吗"}]'></textarea>
-                  <span class="field-hint">留空时由服务端读取该会话的本地记忆。</span>
-                  <p class="field-error" id="contextError" role="alert" hidden></p>
-                </div>
-
-                <label class="check-row" for="persistTurn">
-                  <input id="persistTurn" name="persist_turn" type="checkbox">
-                  <span>
-                    <strong>写入本地对话记忆</strong>
-                    <small>只影响本机数据，不会发送到闲鱼。</small>
-                  </span>
-                </label>
-              </div>
-            </details>
-
-            <div class="form-actions">
-              <button class="button button-primary" id="submitReplyButton" type="submit">
-                <span class="button-label">生成模拟回复</span>
-                <span class="button-loading" hidden>生成中…</span>
-              </button>
-              <button class="button button-secondary" id="resetReplyButton" type="reset">清空结果</button>
-            </div>
-            <div class="form-feedback" id="replyFeedback" aria-live="assertive" hidden></div>
-          </form>
-        </section>
-
-        <section class="panel result-panel" aria-labelledby="resultTitle" aria-live="polite" aria-busy="false">
-          <div class="panel-heading result-heading">
-            <div>
-              <p class="section-kicker">决策结果</p>
-              <h2 id="resultTitle">回复、规则与记忆</h2>
-            </div>
-            <div class="result-actions">
-              <button class="button button-secondary button-compact" id="openLatestTraceButton" type="button" hidden>查看本次 Trace</button>
-              <button class="button button-secondary button-compact" id="copyReplyButton" type="button" hidden>复制回复</button>
-            </div>
-          </div>
-
-          <div class="empty-state" id="resultEmpty">
-            <strong>还没有模拟结果</strong>
-            <p>输入一条买家消息后，这里会显示回复、意图、价格护栏、知识命中和本地记忆。</p>
-          </div>
-
-          <div class="result-loading" id="resultLoading" hidden aria-hidden="true">
-            <div class="skeleton-line skeleton-line-short"></div>
-            <div class="skeleton-line"></div>
-            <div class="skeleton-line"></div>
-            <div class="skeleton-block"></div>
-          </div>
-
-          <div class="result-content" id="resultContent" hidden>
-            <section class="result-block reply-block" aria-labelledby="replyOutputTitle">
-              <div class="result-block-heading">
-                <h3 id="replyOutputTitle">建议回复</h3>
-                <div class="badge-row" id="resultBadges"></div>
-              </div>
-              <blockquote id="replyOutput"></blockquote>
-              <p class="result-note" id="replayNote" hidden></p>
-            </section>
-
-            <section class="result-block" aria-labelledby="decisionOutputTitle">
-              <h3 id="decisionOutputTitle">意图与路由</h3>
-              <dl class="data-list" id="decisionOutput"></dl>
-            </section>
-
-            <section class="result-block" aria-labelledby="priceOutputTitle">
-              <h3 id="priceOutputTitle">价格决策</h3>
-              <div id="priceOutput"></div>
-            </section>
-
-            <section class="result-block" aria-labelledby="knowledgeOutputTitle">
-              <h3 id="knowledgeOutputTitle">知识命中</h3>
-              <div id="knowledgeOutput"></div>
-            </section>
-
-            <section class="result-block" aria-labelledby="memoryOutputTitle">
-              <h3 id="memoryOutputTitle">本地记忆</h3>
-              <div id="memoryOutput"></div>
-            </section>
-
-            <details class="raw-details">
-              <summary>查看原始响应</summary>
-              <pre id="rawReplyOutput"></pre>
-            </details>
-          </div>
-        </section>
+              </section>
             </div>
           </section>
 
           <section class="workspace-view" id="view-traces" data-workspace-view="traces" aria-labelledby="tracesTitle" hidden>
             <section class="panel traces-panel">
-        <div class="panel-heading trace-heading">
-          <div>
-            <p class="section-kicker">最近决策</p>
-            <h2 id="tracesTitle">Trace 检查</h2>
-          </div>
-          <div class="trace-heading-actions">
-            <span id="traceCount" class="trace-count">读取中</span>
-            <button class="button button-secondary button-compact" id="refreshTracesButton" type="button">刷新 Trace</button>
-          </div>
-        </div>
-
-        <div class="trace-toolbar" role="search">
-          <div class="trace-search-field">
-            <label for="traceSearch">搜索决策</label>
-            <input id="traceSearch" type="search" placeholder="消息、会话 ID、Agent 或护栏" autocomplete="off">
-          </div>
-          <div class="trace-filter-field">
-            <label for="traceIntentFilter">意图</label>
-            <select id="traceIntentFilter">
-              <option value="">全部意图</option>
-              <option value="price">价格协商</option>
-              <option value="tech">商品咨询</option>
-              <option value="default">普通咨询</option>
-            </select>
-          </div>
-          <p class="trace-filter-summary" id="traceFilterSummary" aria-live="polite">等待 Trace</p>
-        </div>
-
-        <div class="trace-layout">
-          <div class="trace-list-region" aria-label="Trace 列表">
-            <div class="trace-list" id="traceList" aria-busy="true"></div>
-            <div class="empty-state compact-empty" id="traceEmpty" hidden>
-              <strong id="traceEmptyTitle">暂无 Trace</strong>
-              <p id="traceEmptyMessage">完成一次模拟回复后，新的决策记录会出现在这里。</p>
-            </div>
-            <div class="inline-error" id="traceError" role="alert" hidden>
-              <strong id="traceErrorTitle">无法读取 Trace</strong>
-              <p id="traceErrorMessage"></p>
-              <button class="button button-secondary button-compact" id="traceErrorAction" type="button">重试</button>
-            </div>
-          </div>
-
-          <article class="trace-detail" id="traceDetail" aria-live="polite" aria-labelledby="traceDetailTitle">
-            <div class="empty-state trace-detail-empty" id="traceDetailEmpty">
-              <strong>选择一条 Trace 查看详情</strong>
-              <p>可检查意图路由、护栏、定价、知识来源和模型降级。</p>
-            </div>
-            <div id="traceDetailContent" hidden>
-              <div class="trace-detail-header">
-                <div>
-                  <p class="trace-time" id="traceDetailTime"></p>
-                  <h3 id="traceDetailTitle">Trace 详情</h3>
-                </div>
-                <span class="badge" id="traceDetailIntent"></span>
+              <div class="panel-heading database-heading">
+                <div><p class="section-kicker">Decision database</p><h2 id="tracesTitle">Agent 决策数据库</h2><p>像检查工单一样检查每一次路由、护栏、定价与模型降级。</p></div>
+                <div class="trace-heading-actions"><span id="traceCount" class="trace-count">读取中</span><button class="button button-secondary button-compact" id="refreshTracesButton" type="button">刷新记录</button></div>
               </div>
-              <p class="trace-message" id="traceDetailMessage"></p>
-              <div class="trace-sections" id="traceSections"></div>
-              <details class="raw-details">
-                <summary>查看原始 Trace</summary>
-                <pre id="rawTraceOutput"></pre>
-              </details>
-            </div>
-          </article>
-        </div>
+              <div class="trace-toolbar" role="search">
+                <div class="trace-search-field"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg><label class="sr-only" for="traceSearch">搜索决策</label><input id="traceSearch" type="search" placeholder="搜索消息、会话 ID、Agent 或护栏" autocomplete="off"></div>
+                <div class="trace-filter-field"><label for="traceIntentFilter">意图</label><select id="traceIntentFilter"><option value="">全部意图</option><option value="price">价格协商</option><option value="tech">商品咨询</option><option value="default">普通咨询</option></select></div>
+                <div class="trace-filter-field"><label for="traceStatusFilter">状态</label><select id="traceStatusFilter"><option value="">全部状态</option><option value="safe">已通过</option><option value="review">需复核</option><option value="blocked">已拦截</option></select></div>
+                <p class="trace-filter-summary" id="traceFilterSummary" aria-live="polite">等待 Trace</p>
+              </div>
+              <div class="trace-layout">
+                <div class="trace-list-region" aria-label="Trace 列表">
+                  <div class="trace-list-header" aria-hidden="true"><span>决策 / 消息</span><span>更新时间</span></div>
+                  <div class="trace-list" id="traceList" aria-busy="true"></div>
+                  <div class="empty-state compact-empty" id="traceEmpty" hidden><span class="empty-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"></path></svg></span><strong id="traceEmptyTitle">暂无 Trace</strong><p id="traceEmptyMessage">完成一次模拟回复后，新的决策记录会出现在这里。</p></div>
+                  <div class="inline-error" id="traceError" role="alert" hidden><strong id="traceErrorTitle">无法读取 Trace</strong><p id="traceErrorMessage"></p><button class="button button-secondary button-compact" id="traceErrorAction" type="button">重试</button></div>
+                </div>
+                <article class="trace-detail" id="traceDetail" aria-live="polite" aria-labelledby="traceDetailTitle">
+                  <div class="empty-state trace-detail-empty" id="traceDetailEmpty"><span class="empty-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"></path></svg></span><strong>选择一条记录</strong><p>右侧会显示该次决策的完整证据与安全状态。</p></div>
+                  <div id="traceDetailContent" hidden><div class="trace-detail-header"><div><p class="trace-time" id="traceDetailTime"></p><h3 id="traceDetailTitle">Trace 详情</h3></div><span class="badge" id="traceDetailIntent"></span></div><p class="trace-message" id="traceDetailMessage"></p><div class="trace-sections" id="traceSections"></div><details class="raw-details"><summary>原始 Trace JSON</summary><pre id="rawTraceOutput"></pre></details></div>
+                </article>
+              </div>
             </section>
           </section>
 
-          <section class="workspace-view" id="view-runtime" data-workspace-view="runtime" aria-labelledby="overviewTitle" hidden>
-            <section class="overview-section">
-              <div class="section-heading heading-row">
-                <div>
-                  <p class="section-kicker">运行总览</p>
-                  <h2 id="overviewTitle">先确认服务，再处理消息</h2>
-                </div>
-                <p class="updated-time" id="overviewUpdatedAt">正在读取本地运行快照</p>
-              </div>
-
-              <div class="metric-grid" id="metricGrid" aria-live="polite" aria-busy="true">
-                <article class="metric-item">
-                  <span class="metric-label">Worker 状态</span>
-                  <strong class="metric-value skeleton-text" id="workerMetric">读取中</strong>
-                  <span class="metric-note" id="workerMetricNote">等待运行快照</span>
-                </article>
-                <article class="metric-item">
-                  <span class="metric-label">最近心跳</span>
-                  <strong class="metric-value skeleton-text" id="heartbeatMetric">读取中</strong>
-                  <span class="metric-note" id="heartbeatMetricNote">等待 Worker 上报</span>
-                </article>
-                <article class="metric-item">
-                  <span class="metric-label">最近 Trace</span>
-                  <strong class="metric-value skeleton-text" id="traceMetric">读取中</strong>
-                  <span class="metric-note" id="traceMetricNote">最近 50 条采样</span>
-                </article>
-                <article class="metric-item">
-                  <span class="metric-label">护栏触发 / 模型降级</span>
-                  <strong class="metric-value skeleton-text" id="guardrailMetric">读取中</strong>
-                  <span class="metric-note" id="guardrailMetricNote">来自真实 Trace</span>
-                </article>
-              </div>
-            </section>
-
-            <section class="panel runtime-panel" aria-labelledby="runtimeDetailTitle">
-              <div class="panel-heading runtime-panel-heading">
-                <div>
-                  <p class="section-kicker">真实快照</p>
-                  <h2 id="runtimeDetailTitle">Worker 运行明细</h2>
-                </div>
-                <button class="button button-secondary button-compact" id="refreshRuntimeButton" type="button">刷新运行状态</button>
-              </div>
-              <div class="runtime-detail-grid">
-                <div>
-                  <h3>当前属性</h3>
-                  <dl class="runtime-data-list" id="runtimeDetails"></dl>
-                </div>
-                <div>
-                  <h3>恢复建议</h3>
-                  <ol class="recovery-list" id="runtimeRecoverySteps"></ol>
-                </div>
-              </div>
-              <details class="raw-details runtime-raw-details">
-                <summary>查看原始 Worker 快照</summary>
-                <pre id="runtimeRawOutput"></pre>
-              </details>
-            </section>
+          <section class="workspace-view" id="view-runtime" data-workspace-view="runtime" aria-labelledby="runtimeDetailTitle" hidden>
+            <div class="runtime-overview-grid">
+              <section class="panel runtime-panel" aria-labelledby="runtimeDetailTitle">
+                <div class="panel-heading"><div><p class="section-kicker">Worker snapshot</p><h2 id="runtimeDetailTitle">当前运行属性</h2></div><button class="button button-secondary button-compact" id="refreshRuntimeButton" type="button">刷新快照</button></div>
+                <dl class="runtime-data-list" id="runtimeDetails"></dl>
+              </section>
+              <section class="panel recovery-panel" aria-labelledby="recoveryTitle">
+                <div class="panel-heading compact-heading"><div><p class="section-kicker">Recovery playbook</p><h2 id="recoveryTitle">恢复步骤</h2></div></div>
+                <ol class="recovery-list" id="runtimeRecoverySteps"></ol>
+              </section>
+            </div>
+            <section class="panel runtime-raw-panel" aria-labelledby="runtimeRawTitle"><div class="panel-heading compact-heading"><div><p class="section-kicker">Raw evidence</p><h2 id="runtimeRawTitle">原始 Worker 快照</h2></div></div><details class="raw-details runtime-raw-details"><summary>展开 JSON 数据</summary><pre id="runtimeRawOutput"></pre></details></section>
           </section>
         </main>
       </div>
@@ -414,27 +354,12 @@
 
     <dialog class="token-dialog" id="tokenDialog" aria-labelledby="tokenDialogTitle" aria-describedby="tokenDialogDescription">
       <form id="tokenForm">
-        <div class="dialog-heading">
-          <div>
-            <p class="section-kicker">当前浏览器会话</p>
-            <h2 id="tokenDialogTitle">访问令牌</h2>
-          </div>
-          <button class="dialog-close" id="closeTokenButton" type="button" aria-label="关闭访问令牌窗口">关闭</button>
-        </div>
+        <div class="dialog-heading"><div><p class="section-kicker">Session access</p><h2 id="tokenDialogTitle">访问令牌</h2></div><button class="icon-button dialog-close" id="closeTokenButton" type="button" aria-label="关闭访问令牌窗口"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
         <p id="tokenDialogDescription">令牌仅保存在本标签页的 sessionStorage，关闭标签页后自动清除。</p>
-        <div class="field-group">
-          <label for="accessToken">Bearer token</label>
-          <input id="accessToken" name="access_token" type="password" autocomplete="off" spellcheck="false" placeholder="输入 API_ACCESS_TOKEN">
-        </div>
-        <label class="check-row compact-check" for="showToken">
-          <input id="showToken" type="checkbox">
-          <span><strong>显示令牌</strong></span>
-        </label>
+        <div class="field-group"><label for="accessToken">Bearer token</label><input id="accessToken" name="access_token" type="password" autocomplete="off" spellcheck="false" placeholder="输入 API_ACCESS_TOKEN"></div>
+        <label class="check-row compact-check" for="showToken"><input id="showToken" type="checkbox"><span><strong>显示令牌</strong></span></label>
         <p class="dialog-status" id="tokenDialogStatus" aria-live="polite"></p>
-        <div class="dialog-actions">
-          <button class="button button-primary" type="submit">保存并重试</button>
-          <button class="button button-danger-quiet" id="clearTokenButton" type="button">移除令牌</button>
-        </div>
+        <div class="dialog-actions"><button class="button button-primary" type="submit">保存并重试</button><button class="button button-danger-quiet" id="clearTokenButton" type="button">移除令牌</button></div>
       </form>
     </dialog>
   </body>

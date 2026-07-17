@@ -2,10 +2,28 @@
   "use strict";
 
   const TOKEN_KEY = "xianyu-agent-access-token";
+  const THEME_KEY = "guardagent-console-theme";
   const viewMetadata = {
-    workbench: { title: "回复工作台", eyebrow: "安全试跑" },
-    traces: { title: "决策记录", eyebrow: "可追溯决策" },
-    runtime: { title: "运行状态", eyebrow: "服务与 Worker" },
+    dashboard: {
+      title: "运营总览",
+      eyebrow: "Agent operations",
+      description: "查看 Agent 决策质量、运行风险与最近活动。",
+    },
+    workbench: {
+      title: "回复试跑",
+      eyebrow: "Safe simulation",
+      description: "输入真实买家问题，在不触达闲鱼的前提下检查回复与护栏。",
+    },
+    traces: {
+      title: "决策记录",
+      eyebrow: "Decision database",
+      description: "按状态和意图筛选每一次 Agent 路由、护栏与证据。",
+    },
+    runtime: {
+      title: "运行状态",
+      eyebrow: "Runtime health",
+      description: "检查 API、Worker 心跳、登录态与平台风控恢复路径。",
+    },
   };
   const intentLabels = {
     price: "价格协商",
@@ -78,8 +96,8 @@
     latestReply: null,
     retryAfterToken: null,
     traceErrorIsAuth: false,
-    activeView: "workbench",
-    viewScrollPositions: { workbench: 0, traces: 0, runtime: 0 },
+    activeView: "dashboard",
+    viewScrollPositions: { dashboard: 0, workbench: 0, traces: 0, runtime: 0 },
   };
 
   const elements = {};
@@ -99,6 +117,7 @@
 
   function init() {
     cacheElements();
+    initializeTheme();
     bindEvents();
     activateView(viewFromHash(), { updateHash: false, focus: false });
     updateTokenIndicator();
@@ -109,8 +128,10 @@
 
   function cacheElements() {
     const ids = [
-      "pageEyebrow", "pageTitle", "sidebarTraceCount", "sidebarRuntimeState",
+      "pageEyebrow", "pageTitle", "pageDescription", "sidebarOverviewState", "sidebarTraceCount", "sidebarRuntimeState",
       "apiStatus", "workerStatus", "modeStatus", "refreshAllButton", "openTokenButton",
+      "themeToggleButton", "globalSearch", "mobileNavButton", "closeSidebarButton", "mobileNavBackdrop",
+      "appSidebar", "appWorkspace",
       "tokenIndicator", "globalNotice", "globalNoticeTitle", "globalNoticeMessage",
       "dismissNoticeButton", "runtimeAlert", "runtimeAlertLabel", "runtimeAlertTitle",
       "runtimeAlertMessage", "openRuntimeButton", "overviewUpdatedAt", "metricGrid", "workerMetric",
@@ -123,13 +144,15 @@
       "resultEmpty", "resultLoading", "resultContent", "copyReplyButton", "openLatestTraceButton", "resultBadges",
       "replyOutput", "replayNote", "decisionOutput", "priceOutput", "knowledgeOutput",
       "memoryOutput", "rawReplyOutput", "traceCount", "refreshTracesButton", "traceList",
-      "traceSearch", "traceIntentFilter", "traceFilterSummary", "traceEmpty", "traceEmptyTitle",
+      "traceSearch", "traceIntentFilter", "traceStatusFilter", "traceFilterSummary", "traceEmpty", "traceEmptyTitle",
       "traceEmptyMessage", "traceError", "traceErrorTitle", "traceErrorMessage", "traceErrorAction",
       "traceDetail", "traceDetailEmpty", "traceDetailContent", "traceDetailTime",
       "traceDetailTitle", "traceDetailIntent", "traceDetailMessage", "traceSections",
       "rawTraceOutput", "tokenDialog", "tokenForm", "closeTokenButton", "accessToken",
       "showToken", "tokenDialogStatus", "clearTokenButton", "refreshRuntimeButton",
       "runtimeDetails", "runtimeRecoverySteps", "runtimeRawOutput",
+      "dashboardSafeRate", "dashboardSafeRateNote", "dashboardIntentBars", "dashboardTraceTable",
+      "dashboardActivityList", "dashboardFocusStatus", "dashboardFocusTitle", "dashboardFocusMessage",
     ];
     ids.forEach((id) => {
       elements[id] = document.getElementById(id);
@@ -138,9 +161,22 @@
 
   function bindEvents() {
     document.querySelectorAll("[data-view]").forEach((button) => {
-      button.addEventListener("click", () => activateView(button.dataset.view, { updateHash: true, focus: true }));
+      button.addEventListener("click", () => {
+        activateView(button.dataset.view, { updateHash: true, focus: true });
+        closeMobileNav();
+      });
+    });
+    document.querySelectorAll("[data-action-view]").forEach((button) => {
+      button.addEventListener("click", () => activateView(button.dataset.actionView, { updateHash: true, focus: true }));
     });
     window.addEventListener("hashchange", () => activateView(viewFromHash(), { updateHash: false, focus: true }));
+    window.addEventListener("resize", handleViewportChange);
+    document.addEventListener("keydown", handleGlobalShortcut);
+    elements.globalSearch.addEventListener("keydown", handleGlobalSearch);
+    elements.themeToggleButton.addEventListener("click", toggleTheme);
+    elements.mobileNavButton.addEventListener("click", openMobileNav);
+    elements.closeSidebarButton.addEventListener("click", () => closeMobileNav());
+    elements.mobileNavBackdrop.addEventListener("click", () => closeMobileNav());
     elements.refreshAllButton.addEventListener("click", () => loadDashboard(true));
     elements.refreshRuntimeButton.addEventListener("click", () => loadDashboard(true));
     elements.refreshTracesButton.addEventListener("click", () => loadTraces(true));
@@ -171,7 +207,9 @@
     elements.openLatestTraceButton.addEventListener("click", openLatestTrace);
     elements.traceSearch.addEventListener("input", applyTraceFilters);
     elements.traceIntentFilter.addEventListener("change", applyTraceFilters);
+    elements.traceStatusFilter.addEventListener("change", applyTraceFilters);
     elements.traceList.addEventListener("click", selectTraceFromEvent);
+    elements.dashboardTraceTable.addEventListener("click", selectDashboardTrace);
     elements.traceErrorAction.addEventListener("click", () => {
       if (state.traceErrorIsAuth) {
         state.retryAfterToken = () => loadTraces(true);
@@ -182,13 +220,129 @@
     });
   }
 
+  function initializeTheme() {
+    let savedTheme = "";
+    try {
+      savedTheme = window.localStorage.getItem(THEME_KEY) || "";
+    } catch (error) {
+      savedTheme = "";
+    }
+    const preferredTheme = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? "dark"
+      : "light";
+    applyTheme(savedTheme === "dark" || savedTheme === "light" ? savedTheme : preferredTheme);
+  }
+
+  function toggleTheme() {
+    const nextTheme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+    applyTheme(nextTheme);
+    try {
+      window.localStorage.setItem(THEME_KEY, nextTheme);
+    } catch (error) {
+      // The visual theme still works when persistent browser storage is disabled.
+    }
+  }
+
+  function applyTheme(theme) {
+    document.documentElement.dataset.theme = theme;
+    elements.themeToggleButton.setAttribute("aria-label", theme === "dark" ? "切换浅色模式" : "切换深色模式");
+    elements.themeToggleButton.title = theme === "dark" ? "切换浅色模式" : "切换深色模式";
+  }
+
+  function openMobileNav() {
+    document.body.classList.add("nav-open");
+    elements.mobileNavBackdrop.hidden = false;
+    elements.mobileNavButton.setAttribute("aria-expanded", "true");
+    elements.appWorkspace.inert = true;
+    elements.appSidebar.setAttribute("role", "dialog");
+    elements.appSidebar.setAttribute("aria-modal", "true");
+    window.requestAnimationFrame(() => elements.closeSidebarButton.focus());
+  }
+
+  function closeMobileNav(options) {
+    const settings = { restoreFocus: true, ...(options || {}) };
+    const wasOpen = document.body.classList.contains("nav-open");
+    document.body.classList.remove("nav-open");
+    elements.mobileNavBackdrop.hidden = true;
+    elements.mobileNavButton.setAttribute("aria-expanded", "false");
+    elements.appWorkspace.inert = false;
+    elements.appSidebar.removeAttribute("role");
+    elements.appSidebar.removeAttribute("aria-modal");
+    if (wasOpen && settings.restoreFocus && window.innerWidth <= 960) {
+      elements.mobileNavButton.focus({ preventScroll: true });
+    }
+  }
+
+  function handleViewportChange() {
+    if (window.innerWidth > 960 && document.body.classList.contains("nav-open")) {
+      closeMobileNav({ restoreFocus: false });
+    }
+  }
+
+  function trapMobileNavFocus(event) {
+    if (event.key !== "Tab" || !document.body.classList.contains("nav-open") || window.innerWidth > 960) {
+      return false;
+    }
+    const focusable = Array.from(elements.appSidebar.querySelectorAll(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    )).filter((element) => element.getClientRects().length > 0);
+    if (!focusable.length) {
+      event.preventDefault();
+      return true;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && (document.activeElement === first || !elements.appSidebar.contains(document.activeElement))) {
+      event.preventDefault();
+      last.focus();
+      return true;
+    }
+    if (!event.shiftKey && (document.activeElement === last || !elements.appSidebar.contains(document.activeElement))) {
+      event.preventDefault();
+      first.focus();
+      return true;
+    }
+    return false;
+  }
+
+  function handleGlobalShortcut(event) {
+    if (trapMobileNavFocus(event)) {
+      return;
+    }
+    if (event.key === "Escape" && document.body.classList.contains("nav-open")) {
+      closeMobileNav();
+      return;
+    }
+    const target = event.target;
+    const isTyping = target instanceof HTMLInputElement
+      || target instanceof HTMLTextAreaElement
+      || target instanceof HTMLSelectElement
+      || target.isContentEditable;
+    if (event.key === "/" && !isTyping && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      event.preventDefault();
+      elements.globalSearch.focus();
+    }
+  }
+
+  function handleGlobalSearch(event) {
+    if (event.key !== "Enter") {
+      return;
+    }
+    event.preventDefault();
+    elements.traceSearch.value = elements.globalSearch.value.trim();
+    elements.traceIntentFilter.value = "";
+    elements.traceStatusFilter.value = "";
+    applyTraceFilters();
+    activateView("traces", { updateHash: true, focus: true });
+  }
+
   function viewFromHash() {
     const candidate = window.location.hash.replace(/^#/, "");
-    return Object.prototype.hasOwnProperty.call(viewMetadata, candidate) ? candidate : "workbench";
+    return Object.prototype.hasOwnProperty.call(viewMetadata, candidate) ? candidate : "dashboard";
   }
 
   function activateView(view, options) {
-    const targetView = Object.prototype.hasOwnProperty.call(viewMetadata, view) ? view : "workbench";
+    const targetView = Object.prototype.hasOwnProperty.call(viewMetadata, view) ? view : "dashboard";
     const settings = { updateHash: false, focus: false, ...(options || {}) };
     const previousView = state.activeView;
     if (previousView !== targetView && Object.prototype.hasOwnProperty.call(viewMetadata, previousView)) {
@@ -211,6 +365,7 @@
     const metadata = viewMetadata[targetView];
     elements.pageEyebrow.textContent = metadata.eyebrow;
     elements.pageTitle.textContent = metadata.title;
+    elements.pageDescription.textContent = metadata.description;
     elements.openRuntimeButton.hidden = targetView === "runtime";
     document.title = `${metadata.title} | 闲鱼卖家 Agent 操作台`;
 
@@ -235,6 +390,7 @@
     const latest = state.traces[0];
     elements.traceSearch.value = "";
     elements.traceIntentFilter.value = "";
+    elements.traceStatusFilter.value = "";
     state.selectedTraceTimestamp = latest ? latest.timestamp : null;
     applyTraceFilters();
     activateView("traces", { updateHash: true, focus: true });
@@ -260,7 +416,7 @@
 
     const traceRequest = state.access.tokenRequired && !getToken()
       ? Promise.resolve().then(() => {
-        renderTraceError(new ApiError(401, { detail: "invalid_or_missing_access_token" }));
+        renderTraceError(new ApiError(401, { detail: "invalid_or_missing_access_token" }), { promptAuth: false });
         setTraceLoading(false);
         return {};
       })
@@ -291,7 +447,12 @@
         element.classList.add("skeleton-text");
       });
     elements.overviewUpdatedAt.textContent = "正在读取本地运行快照";
+    elements.sidebarOverviewState.textContent = "同步中";
     elements.sidebarRuntimeState.textContent = "检查中";
+    elements.dashboardFocusStatus.textContent = "正在检查";
+    delete elements.dashboardFocusStatus.dataset.tone;
+    elements.dashboardFocusTitle.textContent = "读取当前运行风险";
+    elements.dashboardFocusMessage.textContent = "操作台正在核对 Worker 快照与最近 Trace。";
   }
 
   function renderOverview(data) {
@@ -340,8 +501,10 @@
     elements.sidebarRuntimeState.textContent = workerSnapshot.last_error_type === "XianyuRiskControlError"
       ? "平台风控"
       : worker.healthy ? "运行正常" : stateLabel;
+    elements.sidebarOverviewState.textContent = worker.healthy ? "正常" : "需处理";
     elements.sidebarTraceCount.textContent = `${sampleSize} 条`;
     renderRuntimeState(worker, workerSnapshot, stateLabel, reasonLabel, lastHeartbeat);
+    renderDashboardInsights();
 
     if (state.access.tokenRequired && !getToken()) {
       showNotice("API 已启用访问保护", "运行总览可见，模拟回复和 Trace 需要先设置访问令牌。", "warning");
@@ -349,6 +512,7 @@
   }
 
   function renderOverviewError(error) {
+    state.overview = null;
     setStatus(elements.apiStatus, "error", "连接失败");
     setStatus(elements.workerStatus, "error", "无法读取");
     setStatus(elements.modeStatus, "warning", "模式未知");
@@ -362,6 +526,7 @@
     elements.guardrailMetricNote.textContent = "未取得统计数据";
     elements.metricGrid.setAttribute("aria-busy", "false");
     elements.overviewUpdatedAt.textContent = "本次读取失败";
+    elements.sidebarOverviewState.textContent = "离线";
     elements.sidebarRuntimeState.textContent = "读取失败";
     elements.runtimeAlert.hidden = false;
     elements.runtimeAlert.dataset.tone = "error";
@@ -371,6 +536,7 @@
     elements.runtimeDetails.replaceChildren();
     elements.runtimeRecoverySteps.replaceChildren();
     elements.runtimeRawOutput.textContent = "";
+    renderDashboardInsights();
     showNotice("无法连接本地 API", describeGenericError(error), "error");
   }
 
@@ -455,12 +621,13 @@
   async function loadTraces(announce) {
     setTraceLoading(true);
     try {
-      const data = await apiFetch("/api/traces?limit=20");
+      const data = await apiFetch("/api/traces?limit=50");
       const records = Array.isArray(data.items) ? data.items.slice().reverse() : [];
       state.traces = records;
       state.traceErrorIsAuth = false;
       elements.sidebarTraceCount.textContent = `${records.length} 条`;
       applyTraceFilters();
+      renderDashboardInsights();
       if (announce) {
         showNotice("Trace 已刷新", records.length ? `已读取最近 ${records.length} 条记录。` : "当前还没有 Trace。", "ok", 2800);
       }
@@ -489,9 +656,13 @@
   function applyTraceFilters() {
     const query = elements.traceSearch.value.trim().toLocaleLowerCase("zh-CN");
     const intent = elements.traceIntentFilter.value;
+    const status = elements.traceStatusFilter.value;
     const records = state.traces.filter((record) => {
       const trace = record && record.trace ? record.trace : {};
       if (intent && trace.intent !== intent) {
+        return false;
+      }
+      if (status && getTraceStatus(trace).key !== status) {
         return false;
       }
       if (!query) {
@@ -611,16 +782,217 @@
       ? trace.style.unresolved_violations
       : [];
     if (trace.no_reply === true) {
-      return { label: "已拦截", tone: "warning" };
+      return { label: "已拦截", tone: "warning", key: "blocked" };
     }
     if ((trace.rules && trace.rules.safe === false) || (trace.style && trace.style.safe === false)
       || ruleViolations.length > 0 || styleViolations.length > 0) {
-      return { label: "需复核", tone: "warning" };
+      return { label: "需复核", tone: "warning", key: "review" };
     }
-    return { label: "已通过", tone: "ok" };
+    return { label: "已通过", tone: "ok", key: "safe" };
   }
 
-  function renderTraceError(error) {
+  function renderDashboardInsights() {
+    const records = state.traces;
+    const statuses = records.map((record) => getTraceStatus(record && record.trace ? record.trace : {}));
+    const safeCount = statuses.filter((status) => status.key === "safe").length;
+    const attentionCount = statuses.length - safeCount;
+    const safeRate = records.length ? Math.round((safeCount / records.length) * 100) : 0;
+    const rateValue = elements.dashboardSafeRate.querySelector("strong");
+
+    elements.dashboardSafeRate.style.setProperty("--score", String(safeRate));
+    rateValue.textContent = `${safeRate}%`;
+    elements.dashboardSafeRateNote.textContent = records.length
+      ? `${safeCount} 条通过，${attentionCount} 条需要关注`
+      : state.traceErrorIsAuth ? "设置访问令牌后显示质量统计" : "完成一次回复试跑后开始统计";
+
+    renderIntentDistribution(records);
+    renderDashboardTraceTable(records.slice(0, 6));
+    renderDashboardActivity(records.slice(0, 4));
+    renderDashboardFocus();
+  }
+
+  function renderIntentDistribution(records) {
+    const counts = { price: 0, tech: 0, default: 0 };
+    records.forEach((record) => {
+      const intent = record && record.trace ? record.trace.intent : "";
+      if (Object.prototype.hasOwnProperty.call(counts, intent)) {
+        counts[intent] += 1;
+      }
+    });
+    const maxCount = Math.max(1, ...Object.values(counts));
+    elements.dashboardIntentBars.replaceChildren();
+
+    Object.entries(counts).forEach(([intent, count]) => {
+      const row = document.createElement("div");
+      const label = document.createElement("span");
+      const track = document.createElement("span");
+      const bar = document.createElement("i");
+      const value = document.createElement("strong");
+      row.className = "intent-row";
+      track.className = "intent-track";
+      label.textContent = intentLabels[intent] || intent;
+      bar.style.width = `${Math.round((count / maxCount) * 100)}%`;
+      value.textContent = String(count);
+      track.append(bar);
+      row.append(label, track, value);
+      elements.dashboardIntentBars.append(row);
+    });
+  }
+
+  function renderDashboardTraceTable(records) {
+    elements.dashboardTraceTable.replaceChildren();
+    if (records.length === 0) {
+      const row = document.createElement("tr");
+      const cell = document.createElement("td");
+      cell.colSpan = 5;
+      cell.className = "table-empty";
+      cell.textContent = state.traceErrorIsAuth ? "Trace 已启用访问保护" : "还没有可展示的 Agent 决策";
+      row.append(cell);
+      elements.dashboardTraceTable.append(row);
+      return;
+    }
+
+    records.forEach((record, index) => {
+      const trace = record && record.trace ? record.trace : {};
+      const status = getTraceStatus(trace);
+      const row = document.createElement("tr");
+      const statusCell = document.createElement("td");
+      const statusBadge = document.createElement("span");
+      const messageCell = document.createElement("td");
+      const messageButton = document.createElement("button");
+      const intentCell = document.createElement("td");
+      const agentCell = document.createElement("td");
+      const timeCell = document.createElement("td");
+      const time = document.createElement("time");
+
+      statusBadge.className = "table-status";
+      statusBadge.dataset.tone = status.tone;
+      statusBadge.textContent = status.label;
+      messageButton.type = "button";
+      messageButton.className = "table-message";
+      messageButton.dataset.dashboardTraceIndex = String(index);
+      messageButton.textContent = trace.user_msg || "未记录买家消息";
+      messageButton.title = messageButton.textContent;
+      intentCell.textContent = intentLabels[trace.intent] || trace.intent || "未知";
+      agentCell.textContent = trace.routed_agent || "未记录";
+      time.textContent = formatRelativeTime(record.timestamp);
+      time.dateTime = record.timestamp || "";
+      statusCell.append(statusBadge);
+      messageCell.append(messageButton);
+      timeCell.append(time);
+      row.append(statusCell, messageCell, intentCell, agentCell, timeCell);
+      elements.dashboardTraceTable.append(row);
+    });
+  }
+
+  function renderDashboardActivity(records) {
+    elements.dashboardActivityList.replaceChildren();
+    const overview = state.overview || {};
+    const worker = overview.worker || {};
+    const workerSnapshot = worker.status && typeof worker.status === "object" ? worker.status : {};
+    const entries = [];
+
+    if (state.overview && !worker.healthy) {
+      entries.push({
+        title: workerSnapshot.last_error_type === "XianyuRiskControlError" ? "平台风控阻断 Worker" : "Worker 需要处理",
+        detail: reasonLabels[worker.reason] || humanizeKey(worker.reason || "unknown"),
+        timestamp: workerSnapshot.updated_at,
+        tone: "warning",
+      });
+    }
+    records.forEach((record) => {
+      const trace = record && record.trace ? record.trace : {};
+      const status = getTraceStatus(trace);
+      entries.push({
+        title: `${intentLabels[trace.intent] || trace.intent || "未知意图"} · ${status.label}`,
+        detail: trace.user_msg || "未记录买家消息",
+        timestamp: record.timestamp,
+        tone: status.tone,
+      });
+    });
+
+    if (entries.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "empty-state compact-empty";
+      empty.append(makeParagraph(state.traceErrorIsAuth ? "输入访问令牌后显示实时动态。" : "新的 Agent 决策会出现在这里。"));
+      elements.dashboardActivityList.append(empty);
+      return;
+    }
+
+    entries.slice(0, 4).forEach((entry) => {
+      const item = document.createElement("article");
+      const dot = document.createElement("span");
+      const copy = document.createElement("div");
+      const title = document.createElement("strong");
+      const detail = document.createElement("p");
+      const time = document.createElement("time");
+      item.className = "activity-item";
+      dot.className = "activity-dot";
+      dot.dataset.tone = entry.tone;
+      title.textContent = entry.title;
+      detail.textContent = entry.detail;
+      time.textContent = entry.timestamp ? formatRelativeTime(entry.timestamp) : "刚刚";
+      time.dateTime = entry.timestamp || "";
+      copy.append(title, detail);
+      item.append(dot, copy, time);
+      elements.dashboardActivityList.append(item);
+    });
+  }
+
+  function renderDashboardFocus() {
+    const overview = state.overview;
+    if (!overview) {
+      elements.dashboardFocusStatus.textContent = "API 离线";
+      elements.dashboardFocusStatus.dataset.tone = "error";
+      elements.dashboardFocusTitle.textContent = "操作台无法读取真实运行状态";
+      elements.dashboardFocusMessage.textContent = "先启动本地 API，再刷新页面读取 Worker 与 Trace。";
+      return;
+    }
+
+    const worker = overview.worker || {};
+    const workerSnapshot = worker.status && typeof worker.status === "object" ? worker.status : {};
+    if (workerSnapshot.last_error_type === "XianyuRiskControlError") {
+      elements.dashboardFocusStatus.textContent = "平台风控";
+      elements.dashboardFocusStatus.dataset.tone = "error";
+      elements.dashboardFocusTitle.textContent = "闲鱼风控验证仍在阻断 Worker";
+      elements.dashboardFocusMessage.textContent = "保持 Dry-run，完成官方验证并更新登录态后，再重启 Worker。";
+    } else if (!worker.healthy) {
+      elements.dashboardFocusStatus.textContent = "需要处理";
+      elements.dashboardFocusStatus.dataset.tone = "warning";
+      elements.dashboardFocusTitle.textContent = "Worker 当前不能视为可用";
+      elements.dashboardFocusMessage.textContent = reasonLabels[worker.reason] || humanizeKey(worker.reason || "unknown");
+    } else if (workerSnapshot.dry_run === false) {
+      elements.dashboardFocusStatus.textContent = "真实发送";
+      elements.dashboardFocusStatus.dataset.tone = "warning";
+      elements.dashboardFocusTitle.textContent = "在线 Worker 已开启真实发送";
+      elements.dashboardFocusMessage.textContent = "请持续检查 Trace、价格护栏和账号状态，回复试跑页仍不会触达买家。";
+    } else {
+      elements.dashboardFocusStatus.textContent = "安全运行";
+      elements.dashboardFocusStatus.dataset.tone = "ok";
+      elements.dashboardFocusTitle.textContent = "Worker 与本地安全模式运行正常";
+      elements.dashboardFocusMessage.textContent = "可以继续通过回复试跑验证新场景，再根据 Trace 评估是否调整规则。";
+    }
+  }
+
+  function selectDashboardTrace(event) {
+    const button = event.target.closest("button[data-dashboard-trace-index]");
+    if (!button) {
+      return;
+    }
+    const record = state.traces[Number(button.dataset.dashboardTraceIndex)];
+    if (!record) {
+      return;
+    }
+    elements.traceSearch.value = "";
+    elements.traceIntentFilter.value = "";
+    elements.traceStatusFilter.value = "";
+    state.selectedTraceTimestamp = record.timestamp;
+    applyTraceFilters();
+    activateView("traces", { updateHash: true, focus: true });
+  }
+
+  function renderTraceError(error, options) {
+    const settings = { promptAuth: true, ...(options || {}) };
     state.visibleTraces = [];
     elements.traceList.replaceChildren();
     elements.traceEmpty.hidden = true;
@@ -635,13 +1007,16 @@
       elements.traceErrorMessage.textContent = "输入有效的 Bearer token 后即可读取 Trace。";
       elements.traceErrorAction.textContent = "输入令牌";
       state.retryAfterToken = () => loadTraces(true);
-      showTokenDialog("访问 Trace 需要有效令牌。");
+      if (settings.promptAuth) {
+        showTokenDialog("访问 Trace 需要有效令牌。");
+      }
     } else {
       elements.traceErrorTitle.textContent = "无法读取 Trace";
       elements.traceErrorMessage.textContent = describeGenericError(error);
       elements.traceErrorAction.textContent = "重试";
     }
     clearTraceDetail();
+    renderDashboardInsights();
   }
 
   function clearTraceDetail() {
@@ -1168,11 +1543,30 @@
   }
 
   function setButtonBusy(button, busy, busyLabel) {
+    const iconOnly = button.classList.contains("icon-button");
     if (busy) {
+      if (iconOnly) {
+        button.dataset.originalAriaLabel = button.getAttribute("aria-label") || "";
+        button.dataset.originalTitle = button.getAttribute("title") || "";
+        button.setAttribute("aria-label", busyLabel || "处理中");
+        button.setAttribute("title", busyLabel || "处理中");
+        button.classList.add("is-busy");
+        button.disabled = true;
+        return;
+      }
       button.dataset.originalLabel = button.textContent.trim();
       button.textContent = busyLabel || "处理中…";
       button.disabled = true;
     } else {
+      if (iconOnly) {
+        button.setAttribute("aria-label", button.dataset.originalAriaLabel || button.getAttribute("aria-label") || "");
+        button.setAttribute("title", button.dataset.originalTitle || button.getAttribute("title") || "");
+        button.classList.remove("is-busy");
+        button.disabled = false;
+        delete button.dataset.originalAriaLabel;
+        delete button.dataset.originalTitle;
+        return;
+      }
       button.textContent = button.dataset.originalLabel || button.textContent;
       button.disabled = false;
       delete button.dataset.originalLabel;

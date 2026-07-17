@@ -105,7 +105,7 @@ $env:API_OFFLINE_MODE="true"
 uvicorn api.app:app --host 127.0.0.1 --port 8000
 ```
 
-服务化入口会复用同一套 `XianyuReplyBot` 决策核心，并在根路径提供本地卖家操作台。浏览器打开 `http://127.0.0.1:8000/`，可以在“回复工作台 / 决策记录 / 运行状态”之间切换，查看真实 Worker 心跳与 dry-run 状态、安全模拟买家消息、筛选 Trace，并检查价格护栏、事实来源和记忆。控制台的模拟回复不会调用闲鱼发送接口。前端调研、Notion 范式与设计取舍见 [`docs/FRONTEND_RESEARCH_2026-07.md`](docs/FRONTEND_RESEARCH_2026-07.md)。
+服务化入口会复用同一套 `XianyuReplyBot` 决策核心，并在根路径提供本地卖家运营台。浏览器打开 `http://127.0.0.1:8000/`，可在“运营总览 / 回复试跑 / 决策记录 / 运行状态”之间切换：总览聚合真实 Worker、Trace、护栏与实时活动；回复试跑安全模拟买家消息；决策记录按意图和状态筛选 Trace；运行状态提供心跳证据与恢复步骤。控制台的模拟回复不会调用闲鱼发送接口，默认也不会写入会话记忆。前端调研、Notion 范式与设计取舍见 [`docs/FRONTEND_RESEARCH_2026-07.md`](docs/FRONTEND_RESEARCH_2026-07.md)。
 
 核心接口：
 

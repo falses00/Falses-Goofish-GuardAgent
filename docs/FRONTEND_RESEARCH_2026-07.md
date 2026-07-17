@@ -2,72 +2,82 @@
 
 ## Decision
 
-The console needed an information-architecture update, not a visual reset. The previous page already had safe dry-run behavior, readable tokens, accessible form labels, and real Trace data. Its main weakness was that runtime status, reply simulation, and long Trace details lived on one continuous page. A stale or risk-controlled Worker was summarized as a generic authentication failure, so a new seller could not tell what failed or how to recover.
+The old console was replaced instead of reskinned. The new direction is a data-dense seller operations product with four stable destinations:
 
-The implemented direction is a local operator workspace with three stable destinations:
+- **Operations dashboard**: real Worker health, Trace volume, guardrail totals, decision quality, intent distribution, recent activity, and the current operational focus.
+- **Reply dry-run**: a safe message composer and decision inspector that never contacts a buyer and does not persist memory unless the operator opts in.
+- **Decision database**: a searchable, status-aware list-detail view for routing, guardrails, pricing, knowledge evidence, memory, model state, and latency.
+- **Runtime health**: verified snapshot fields, a recovery playbook, and raw evidence behind progressive disclosure.
 
-- **Reply workspace**: dry-run input and result remain the primary task.
-- **Decision records**: a searchable list-detail view exposes intent, route, guardrails, pricing, evidence, and raw Trace.
-- **Runtime status**: verified API and Worker properties are separated from recovery guidance.
+The shell uses a persistent dark sidebar, compact global status bar, global search, four KPI cards, focused operational panels, and a responsive mobile drawer. URL hashes (`#dashboard`, `#workbench`, `#traces`, `#runtime`) preserve direct navigation. No remote font, CDN, framework, or runtime UI dependency was added, so the existing strict Content Security Policy remains intact.
 
-The URL hash preserves the active destination (`#workbench`, `#traces`, `#runtime`). Desktop uses a persistent sidebar; smaller screens use the same three destinations as a compact top navigation. No new framework or remote UI dependency was added.
+## Reference Project Review
 
-## Source Project Review
+The visual and interaction reference was [Usagi-org/ai-goofish-monitor](https://github.com/Usagi-org/ai-goofish-monitor), especially its [Vue web UI](https://github.com/Usagi-org/ai-goofish-monitor/tree/master/web-ui/src). Its strongest transferable patterns are:
 
-The referenced article, [闲鱼监控工具 ai-goofish-monitor 火到 1.3 万星：我翻完代码，真正难的不是 AI](https://mp.weixin.qq.com/s/rHnfClbBW_3t4ZLIrGUnqg?scene=1), discusses [Usagi-org/ai-goofish-monitor](https://github.com/Usagi-org/ai-goofish-monitor). The repository and linked issues support three transferable lessons:
+1. a persistent application shell with global search and machine status;
+2. four compact operational metrics instead of a decorative hero;
+3. an activity feed that explains what the system just did;
+4. task and result views with filters, loading, error, and empty states;
+5. a clear split between aggregate monitoring and inspectable records.
 
-1. Deterministic collection, validation, deduplication, and task isolation must happen before model judgment.
-2. Dirty inputs can corrupt later price or recommendation decisions even when the model rejects individual records.
-3. Platform risk control and expired login state are operating conditions that need visible recovery paths, not hidden log messages.
+GuardAgent does not copy the monitor's scraping domain, component code, glass treatment, or rounded visual style. It adapts the product structure to reply automation: seller messages, Agent routing, evidence, pricing guardrails, memory, and Worker risk control.
 
-Primary evidence:
-
-- [Issue #479: irrelevant results pollute price trends](https://github.com/Usagi-org/ai-goofish-monitor/issues/479)
-- [Issue #430: task data and prompt isolation problems](https://github.com/Usagi-org/ai-goofish-monitor/issues/430)
-- [Issue #308: model compatibility is an operational dependency](https://github.com/Usagi-org/ai-goofish-monitor/issues/308)
-
-The monitoring and scraping features were not copied because they solve a different job. GuardAgent remains a reply automation project. The relevant lesson was applied by surfacing the real `XianyuRiskControlError`, keeping dry-run prominent, and making Trace evidence filterable.
-
-## Frontend Skills Survey
-
-GitHub metadata was queried on 2026-07-17. Stars are a popularity signal, not a quality score.
-
-| Repository | Stars at query time | Use in this project |
-| --- | ---: | --- |
-| [anthropics/skills](https://github.com/anthropics/skills) | 162,043 | Used as the general Agent Skills packaging reference, not as a dashboard design system. |
-| [nextlevelbuilder/ui-ux-pro-max-skill](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill) | 106,906 | Applied adaptive navigation, deep linking, state preservation, 44px touch targets, explicit error recovery, and responsive checks. |
-| [Leonxlnx/taste-skill](https://github.com/Leonxlnx/taste-skill) | 64,526 | Evaluated but not applied because its own scope explicitly excludes dashboards and multi-step product UI. |
-| [pbakaus/impeccable](https://github.com/pbakaus/impeccable) | 47,547 | Applied the product register: restrained color, status-first hierarchy, progressive disclosure, stable components, and evidence-based browser verification. |
-| [superdesigndev/superdesign-skill](https://github.com/superdesigndev/superdesign-skill) | 344 | Evaluated but not introduced because the existing HTML/CSS surface did not need an authenticated external design canvas or a new generated draft layer. |
-
-This selection avoids the common mistake of combining every popular skill. Scope fit and verification requirements take priority over stars.
+The project was archived on 2026-06-09, so it is treated as a design reference rather than an upstream dependency. Its operational lessons still apply: platform risk control must be visible, model output needs deterministic validation, and polluted inputs must not silently influence later decisions.
 
 ## Notion Pattern
 
-The closest official Notion pattern is **Projects backed by database views, status properties, and item detail pages**:
+The connected Notion workspace was searched for customer support, operations dashboard, CRM, ticketing, and database templates. It contained no reusable matching page. The design therefore uses the closest official public Notion patterns:
 
-- [Notion Projects](https://www.notion.com/product/projects)
-- [Introduction to databases](https://www.notion.com/help/intro-to-databases)
-- [Database views](https://www.notion.com/help/views)
-- [Status property](https://www.notion.com/help/guides/status-property)
+- [Customer Ticketing & Support](https://www.notion.com/templates/customer-ticketing-support)
+- [Customer Support Dashboard](https://www.notion.com/templates/customer-support-dashboard)
+- [Work Dashboards](https://www.notion.com/templates/category/work-dashboards)
+- [Database templates](https://www.notion.com/help/database-templates)
 
 GuardAgent borrows the information model, not Notion branding:
 
-- one stable object list with visible properties;
-- search and intent filters over the same Trace collection;
-- a selected record opens in a detail region without losing list context;
-- runtime and safety states use explicit text properties;
-- raw technical data remains available through progressive disclosure.
+- stable records with explicit status properties;
+- multiple views over one decision collection;
+- filters immediately above the collection;
+- a selected item with full detail while list context remains visible;
+- raw technical evidence disclosed only when requested.
+
+## UI UX Pro Max Application
+
+The `ui-ux-pro-max` design-system search was run for an AI customer-support operations dashboard. Its Real-Time / Operations and Data-Dense Dashboard guidance was applied with project-specific constraints:
+
+- restrained blue primary action, semantic green/amber/red status colors, and cool neutral surfaces;
+- system fonts for Chinese stability and CSP compatibility;
+- 8px maximum card radius and minimal elevation;
+- 44px mobile targets, visible keyboard focus, skip link, semantic headings, and reduced-motion support;
+- responsive checks at 390, 1024, and 1440 pixels;
+- no marketing hero, decorative gradient, glass card, external font, or invented metric.
+
+The suggested palette was adapted into light and dark themes. Every dashboard value is derived from `/api/overview` or `/api/traces`; the UI does not manufacture business data.
+
+## Implemented Interaction Contract
+
+- Global search moves to the decision database and applies the same query there.
+- The dashboard's recent rows open the corresponding Trace; the activity feed footer opens the full decision database.
+- Reply dry-run preserves the existing `/api/reply` payload and explicit `persist_turn` behavior.
+- Empty input, invalid structured fields, unauthorized access, request conflicts, and network failures keep actionable feedback.
+- The newest dry-run result can open its Trace directly.
+- Worker risk control remains visible on every view with official recovery steps.
+- Theme choice persists locally; access tokens remain scoped to `sessionStorage`.
+- Mobile navigation traps no page state and closes after a destination is selected.
+- Mobile navigation applies modal semantics, makes the obscured workspace inert, and loops keyboard focus inside the drawer.
 
 ## Verification Contract
 
-The frontend change is complete only when these checks pass:
+The redesign is complete only when all of the following are evidenced:
 
-- one and only one workspace view is visible at a time;
-- browser back/forward and direct hashes preserve the active view;
-- Trace search handles matches and a no-result state;
-- a dry-run reply can open its newly generated Trace;
-- the current risk-control error is visible with recovery steps;
-- 1440px and 390px layouts have no horizontal overflow;
-- visible mobile controls meet the 44px touch-target minimum;
-- keyboard focus, reduced motion, API errors, and token recovery remain usable.
+- exactly one workspace view is visible at a time;
+- direct hashes and view navigation update the page title and heading;
+- a real local dry-run generates a reply while `persist_turn` remains false;
+- global search, intent filter, status filter, selected record, and no-result state work;
+- the real risk-control error and recovery playbook remain visible;
+- 1440x900, 1024x768, and 390x844 layouts have no page-level horizontal overflow;
+- mobile drawer open/close state and `aria-expanded` agree;
+- light and dark themes render with readable semantic state colors;
+- browser console has no errors and the strict CSP remains unchanged;
+- backend tests, replay smoke tests, and eval regression tests still pass.

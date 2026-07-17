@@ -314,11 +314,18 @@ def test_operator_console_and_static_assets_are_served_with_security_headers(tmp
 
     assert page.status_code == 200
     assert "Falses Goofish GuardAgent" in page.text
+    assert 'data-view="dashboard"' in page.text
     assert 'data-view="workbench"' in page.text
     assert 'data-view="traces"' in page.text
     assert 'data-view="runtime"' in page.text
+    assert 'id="globalSearch"' in page.text
+    assert 'id="appWorkspace"' in page.text
+    assert 'id="dashboardTraceTable"' in page.text
     assert 'id="runtimeAlert"' in page.text
     assert 'id="traceSearch"' in page.text
+    assert 'id="traceStatusFilter"' in page.text
+    assert "/static/styles.css?v=20260718.3" in page.text
+    assert "/static/app.js?v=20260718.3" in page.text
     assert stylesheet.status_code == 200
     assert page.headers["x-content-type-options"] == "nosniff"
     assert "default-src 'self'" in page.headers["content-security-policy"]
