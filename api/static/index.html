@@ -7,100 +7,120 @@
     <meta name="description" content="本地优先的闲鱼卖家 Agent 操作台">
     <title>闲鱼卖家 Agent 操作台</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/static/styles.css">
-    <script src="/static/app.js" defer></script>
+    <link rel="stylesheet" href="/static/styles.css?v=20260717.4">
+    <script src="/static/app.js?v=20260717.4" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">跳到主要内容</a>
 
-    <header class="app-header">
-      <div class="header-inner">
-        <div class="product-lockup">
-          <p class="product-kicker">Falses Goofish GuardAgent</p>
-          <h1>闲鱼卖家 Agent 操作台</h1>
-        </div>
-
-        <div class="header-operations">
-          <ul class="service-status" aria-label="服务状态">
-            <li class="status-item" id="apiStatus" data-tone="loading">
-              <span class="status-dot" aria-hidden="true"></span>
-              <span>
-                <span class="status-label">API</span>
-                <strong class="status-value">检查中</strong>
-              </span>
-            </li>
-            <li class="status-item" id="workerStatus" data-tone="loading">
-              <span class="status-dot" aria-hidden="true"></span>
-              <span>
-                <span class="status-label">闲鱼 Worker</span>
-                <strong class="status-value">检查中</strong>
-              </span>
-            </li>
-            <li class="status-item" id="modeStatus" data-tone="loading">
-              <span class="status-dot" aria-hidden="true"></span>
-              <span>
-                <span class="status-label">发送模式</span>
-                <strong class="status-value">检查中</strong>
-              </span>
-            </li>
-          </ul>
-
-          <div class="header-actions">
-            <button class="button button-secondary button-compact" id="refreshAllButton" type="button">
-              刷新状态
-            </button>
-            <button class="button button-secondary button-compact" id="openTokenButton" type="button" aria-haspopup="dialog">
-              访问令牌
-              <span class="token-indicator" id="tokenIndicator" data-active="false" aria-hidden="true"></span>
-            </button>
-          </div>
-        </div>
-      </div>
-    </header>
-
-    <main id="main-content" class="page-shell">
-      <div class="notice" id="globalNotice" role="status" aria-live="polite" hidden>
-        <div>
-          <strong id="globalNoticeTitle"></strong>
-          <p id="globalNoticeMessage"></p>
-        </div>
-        <button class="notice-dismiss" id="dismissNoticeButton" type="button" aria-label="关闭提示">关闭</button>
-      </div>
-
-      <section class="overview-section" aria-labelledby="overviewTitle">
-        <div class="section-heading heading-row">
+    <div class="app-layout">
+      <aside class="app-sidebar" aria-label="操作台导航">
+        <div class="sidebar-brand">
+          <span class="brand-mark" aria-hidden="true">FG</span>
           <div>
-            <p class="section-kicker">运行总览</p>
-            <h2 id="overviewTitle">先确认服务，再处理消息</h2>
+            <strong>GuardAgent</strong>
+            <span>闲鱼卖家操作台</span>
+            <span class="sr-only">Falses Goofish GuardAgent</span>
           </div>
-          <p class="updated-time" id="overviewUpdatedAt">正在读取本地运行快照</p>
         </div>
 
-        <div class="metric-grid" id="metricGrid" aria-live="polite" aria-busy="true">
-          <article class="metric-item">
-            <span class="metric-label">Worker 状态</span>
-            <strong class="metric-value skeleton-text" id="workerMetric">读取中</strong>
-            <span class="metric-note" id="workerMetricNote">等待运行快照</span>
-          </article>
-          <article class="metric-item">
-            <span class="metric-label">最近心跳</span>
-            <strong class="metric-value skeleton-text" id="heartbeatMetric">读取中</strong>
-            <span class="metric-note" id="heartbeatMetricNote">等待 Worker 上报</span>
-          </article>
-          <article class="metric-item">
-            <span class="metric-label">最近 Trace</span>
-            <strong class="metric-value skeleton-text" id="traceMetric">读取中</strong>
-            <span class="metric-note" id="traceMetricNote">最近 50 条采样</span>
-          </article>
-          <article class="metric-item">
-            <span class="metric-label">护栏触发 / 模型降级</span>
-            <strong class="metric-value skeleton-text" id="guardrailMetric">读取中</strong>
-            <span class="metric-note" id="guardrailMetricNote">来自真实 Trace</span>
-          </article>
-        </div>
-      </section>
+        <nav class="sidebar-nav" aria-label="主要功能">
+          <button class="nav-item" type="button" data-view="workbench" aria-current="page">
+            <span>回复工作台</span>
+            <small>安全试跑</small>
+          </button>
+          <button class="nav-item" type="button" data-view="traces">
+            <span>决策记录</span>
+            <small id="sidebarTraceCount">读取中</small>
+          </button>
+          <button class="nav-item" type="button" data-view="runtime">
+            <span>运行状态</span>
+            <small id="sidebarRuntimeState">检查中</small>
+          </button>
+        </nav>
 
-      <div class="workbench">
+        <div class="sidebar-note">
+          <strong>本地优先</strong>
+          <span>页面数据来自当前 API、Worker 快照与 Trace。</span>
+        </div>
+      </aside>
+
+      <div class="app-canvas">
+        <header class="app-header">
+          <div class="header-inner">
+            <div class="page-context">
+              <p class="product-kicker" id="pageEyebrow">安全试跑</p>
+              <h1 id="pageTitle" tabindex="-1">回复工作台</h1>
+            </div>
+
+            <div class="header-operations">
+              <ul class="service-status" aria-label="服务状态">
+                <li class="status-item" id="apiStatus" data-tone="loading">
+                  <span class="status-dot" aria-hidden="true"></span>
+                  <span>
+                    <span class="status-label">API</span>
+                    <strong class="status-value">检查中</strong>
+                  </span>
+                </li>
+                <li class="status-item" id="workerStatus" data-tone="loading">
+                  <span class="status-dot" aria-hidden="true"></span>
+                  <span>
+                    <span class="status-label">闲鱼 Worker</span>
+                    <strong class="status-value">检查中</strong>
+                  </span>
+                </li>
+                <li class="status-item" id="modeStatus" data-tone="loading">
+                  <span class="status-dot" aria-hidden="true"></span>
+                  <span>
+                    <span class="status-label">发送模式</span>
+                    <strong class="status-value">检查中</strong>
+                  </span>
+                </li>
+              </ul>
+
+              <div class="header-actions">
+                <button class="button button-secondary button-compact" id="refreshAllButton" type="button">
+                  刷新状态
+                </button>
+                <button class="button button-secondary button-compact" id="openTokenButton" type="button" aria-haspopup="dialog">
+                  访问令牌
+                  <span class="token-indicator" id="tokenIndicator" data-active="false" aria-hidden="true"></span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </header>
+
+        <main id="main-content" class="page-shell">
+          <div class="notice" id="globalNotice" role="status" aria-live="polite" hidden>
+            <div>
+              <strong id="globalNoticeTitle"></strong>
+              <p id="globalNoticeMessage"></p>
+            </div>
+            <button class="notice-dismiss" id="dismissNoticeButton" type="button" aria-label="关闭提示">关闭</button>
+          </div>
+
+          <section class="runtime-alert" id="runtimeAlert" aria-live="polite" hidden>
+            <div class="runtime-alert-copy">
+              <span class="runtime-alert-label" id="runtimeAlertLabel">需要处理</span>
+              <div>
+                <strong id="runtimeAlertTitle"></strong>
+                <p id="runtimeAlertMessage"></p>
+              </div>
+            </div>
+            <button class="button button-secondary button-compact" id="openRuntimeButton" type="button">查看运行状态</button>
+          </section>
+
+          <section class="workspace-view" id="view-workbench" data-workspace-view="workbench" aria-labelledby="workbenchViewTitle">
+            <div class="view-heading">
+              <div>
+                <h2 id="workbenchViewTitle">先试跑，再决定是否交给 Worker</h2>
+                <p>输入真实买家问题，检查回复、价格护栏、商品事实和本地记忆。此处永远不会发送消息。</p>
+              </div>
+              <span class="safe-badge">Dry-run 工作区</span>
+            </div>
+
+            <div class="workbench">
         <section class="panel simulator-panel" aria-labelledby="simulatorTitle">
           <div class="panel-heading">
             <div>
@@ -204,7 +224,10 @@
               <p class="section-kicker">决策结果</p>
               <h2 id="resultTitle">回复、规则与记忆</h2>
             </div>
-            <button class="button button-secondary button-compact" id="copyReplyButton" type="button" hidden>复制回复</button>
+            <div class="result-actions">
+              <button class="button button-secondary button-compact" id="openLatestTraceButton" type="button" hidden>查看本次 Trace</button>
+              <button class="button button-secondary button-compact" id="copyReplyButton" type="button" hidden>复制回复</button>
+            </div>
           </div>
 
           <div class="empty-state" id="resultEmpty">
@@ -255,9 +278,11 @@
             </details>
           </div>
         </section>
-      </div>
+            </div>
+          </section>
 
-      <section class="panel traces-panel" aria-labelledby="tracesTitle">
+          <section class="workspace-view" id="view-traces" data-workspace-view="traces" aria-labelledby="tracesTitle" hidden>
+            <section class="panel traces-panel">
         <div class="panel-heading trace-heading">
           <div>
             <p class="section-kicker">最近决策</p>
@@ -269,12 +294,29 @@
           </div>
         </div>
 
+        <div class="trace-toolbar" role="search">
+          <div class="trace-search-field">
+            <label for="traceSearch">搜索决策</label>
+            <input id="traceSearch" type="search" placeholder="消息、会话 ID、Agent 或护栏" autocomplete="off">
+          </div>
+          <div class="trace-filter-field">
+            <label for="traceIntentFilter">意图</label>
+            <select id="traceIntentFilter">
+              <option value="">全部意图</option>
+              <option value="price">价格协商</option>
+              <option value="tech">商品咨询</option>
+              <option value="default">普通咨询</option>
+            </select>
+          </div>
+          <p class="trace-filter-summary" id="traceFilterSummary" aria-live="polite">等待 Trace</p>
+        </div>
+
         <div class="trace-layout">
           <div class="trace-list-region" aria-label="Trace 列表">
             <div class="trace-list" id="traceList" aria-busy="true"></div>
             <div class="empty-state compact-empty" id="traceEmpty" hidden>
-              <strong>暂无 Trace</strong>
-              <p>完成一次模拟回复后，新的决策记录会出现在这里。</p>
+              <strong id="traceEmptyTitle">暂无 Trace</strong>
+              <p id="traceEmptyMessage">完成一次模拟回复后，新的决策记录会出现在这里。</p>
             </div>
             <div class="inline-error" id="traceError" role="alert" hidden>
               <strong id="traceErrorTitle">无法读取 Trace</strong>
@@ -305,8 +347,70 @@
             </div>
           </article>
         </div>
-      </section>
-    </main>
+            </section>
+          </section>
+
+          <section class="workspace-view" id="view-runtime" data-workspace-view="runtime" aria-labelledby="overviewTitle" hidden>
+            <section class="overview-section">
+              <div class="section-heading heading-row">
+                <div>
+                  <p class="section-kicker">运行总览</p>
+                  <h2 id="overviewTitle">先确认服务，再处理消息</h2>
+                </div>
+                <p class="updated-time" id="overviewUpdatedAt">正在读取本地运行快照</p>
+              </div>
+
+              <div class="metric-grid" id="metricGrid" aria-live="polite" aria-busy="true">
+                <article class="metric-item">
+                  <span class="metric-label">Worker 状态</span>
+                  <strong class="metric-value skeleton-text" id="workerMetric">读取中</strong>
+                  <span class="metric-note" id="workerMetricNote">等待运行快照</span>
+                </article>
+                <article class="metric-item">
+                  <span class="metric-label">最近心跳</span>
+                  <strong class="metric-value skeleton-text" id="heartbeatMetric">读取中</strong>
+                  <span class="metric-note" id="heartbeatMetricNote">等待 Worker 上报</span>
+                </article>
+                <article class="metric-item">
+                  <span class="metric-label">最近 Trace</span>
+                  <strong class="metric-value skeleton-text" id="traceMetric">读取中</strong>
+                  <span class="metric-note" id="traceMetricNote">最近 50 条采样</span>
+                </article>
+                <article class="metric-item">
+                  <span class="metric-label">护栏触发 / 模型降级</span>
+                  <strong class="metric-value skeleton-text" id="guardrailMetric">读取中</strong>
+                  <span class="metric-note" id="guardrailMetricNote">来自真实 Trace</span>
+                </article>
+              </div>
+            </section>
+
+            <section class="panel runtime-panel" aria-labelledby="runtimeDetailTitle">
+              <div class="panel-heading runtime-panel-heading">
+                <div>
+                  <p class="section-kicker">真实快照</p>
+                  <h2 id="runtimeDetailTitle">Worker 运行明细</h2>
+                </div>
+                <button class="button button-secondary button-compact" id="refreshRuntimeButton" type="button">刷新运行状态</button>
+              </div>
+              <div class="runtime-detail-grid">
+                <div>
+                  <h3>当前属性</h3>
+                  <dl class="runtime-data-list" id="runtimeDetails"></dl>
+                </div>
+                <div>
+                  <h3>恢复建议</h3>
+                  <ol class="recovery-list" id="runtimeRecoverySteps"></ol>
+                </div>
+              </div>
+              <details class="raw-details runtime-raw-details">
+                <summary>查看原始 Worker 快照</summary>
+                <pre id="runtimeRawOutput"></pre>
+              </details>
+            </section>
+          </section>
+        </main>
+      </div>
+    </div>
 
     <dialog class="token-dialog" id="tokenDialog" aria-labelledby="tokenDialogTitle" aria-describedby="tokenDialogDescription">
       <form id="tokenForm">

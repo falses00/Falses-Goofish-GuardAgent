@@ -163,9 +163,12 @@ The interface is flat by default. Panels use one-pixel cool dividers and tonal b
 - **Error / Disabled:** Error copy sits next to the field and is connected through `aria-describedby`; loading disables the submit action without hiding its label.
 
 ### Navigation
-- **Style:** The page opens directly into the operational task. The top status bar remains compact and wraps structurally on mobile; no marketing navigation is added.
+- **Style:** The page opens directly into the reply workspace. Desktop uses a persistent three-item task sidebar; smaller screens adapt the same hierarchy into a top navigation without introducing a second navigation model.
+- **Destinations:** Reply workspace, decision records, and runtime status are stable URL-hash destinations. Navigation preserves filter and form state while changing views.
+- **Status Bar:** API, Worker, and send mode stay visible above each destination. A verified runtime problem appears as an explicit recovery alert instead of a generic health badge.
 
 ### Trace Split View
+- The list follows a database-style view: search, intent filter, explicit decision state, and a stable selected row.
 - Desktop uses a bounded list beside a detailed decision view. Mobile stacks the list and detail, preserves full-width hit targets, and allows raw JSON only inside an explicit disclosure control.
 
 ## Do's and Don'ts

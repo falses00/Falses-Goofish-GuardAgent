@@ -2,6 +2,11 @@
   "use strict";
 
   const TOKEN_KEY = "xianyu-agent-access-token";
+  const viewMetadata = {
+    workbench: { title: "回复工作台", eyebrow: "安全试跑" },
+    traces: { title: "决策记录", eyebrow: "可追溯决策" },
+    runtime: { title: "运行状态", eyebrow: "服务与 Worker" },
+  };
   const intentLabels = {
     price: "价格协商",
     tech: "商品咨询",
@@ -19,6 +24,12 @@
     status_missing: "尚无 Worker 快照",
     status_stale: "Worker 状态已过期",
     invalid_stale_after_seconds: "状态时效配置无效",
+  };
+  const workerErrorLabels = {
+    XianyuRiskControlError: "闲鱼风控验证",
+    AuthenticationError: "登录认证失败",
+    ConnectionError: "网络连接失败",
+    TimeoutError: "连接超时",
   };
   const fieldLabels = {
     user_msg: "买家消息",
@@ -38,6 +49,9 @@
     min_price: "最低价",
     original_price: "原价",
     current_price: "当前报价",
+    price_source: "价格来源",
+    last_committed: "已承诺最低价",
+    buyer_highest: "买家最高出价",
     decision: "决策",
     action: "处理动作",
     reason: "决策原因",
@@ -59,10 +73,13 @@
     access: { tokenRequired: false, docsEnabled: false },
     overview: null,
     traces: [],
+    visibleTraces: [],
     selectedTraceTimestamp: null,
     latestReply: null,
     retryAfterToken: null,
     traceErrorIsAuth: false,
+    activeView: "workbench",
+    viewScrollPositions: { workbench: 0, traces: 0, runtime: 0 },
   };
 
   const elements = {};
@@ -83,6 +100,7 @@
   function init() {
     cacheElements();
     bindEvents();
+    activateView(viewFromHash(), { updateHash: false, focus: false });
     updateTokenIndicator();
     updateMessageCount();
     generateRequestId();
@@ -91,23 +109,27 @@
 
   function cacheElements() {
     const ids = [
+      "pageEyebrow", "pageTitle", "sidebarTraceCount", "sidebarRuntimeState",
       "apiStatus", "workerStatus", "modeStatus", "refreshAllButton", "openTokenButton",
       "tokenIndicator", "globalNotice", "globalNoticeTitle", "globalNoticeMessage",
-      "dismissNoticeButton", "overviewUpdatedAt", "metricGrid", "workerMetric",
+      "dismissNoticeButton", "runtimeAlert", "runtimeAlertLabel", "runtimeAlertTitle",
+      "runtimeAlertMessage", "openRuntimeButton", "overviewUpdatedAt", "metricGrid", "workerMetric",
       "workerMetricNote", "heartbeatMetric", "heartbeatMetricNote", "traceMetric",
       "traceMetricNote", "guardrailMetric", "guardrailMetricNote", "replyForm",
       "userMessage", "userMessageCount", "userMessageError", "additionalMessages",
       "requestId", "generateRequestIdButton", "chatId", "itemId", "userId",
       "assistantId", "itemInfo", "itemInfoError", "conversationContext", "contextError",
       "persistTurn", "submitReplyButton", "resetReplyButton", "replyFeedback",
-      "resultEmpty", "resultLoading", "resultContent", "copyReplyButton", "resultBadges",
+      "resultEmpty", "resultLoading", "resultContent", "copyReplyButton", "openLatestTraceButton", "resultBadges",
       "replyOutput", "replayNote", "decisionOutput", "priceOutput", "knowledgeOutput",
       "memoryOutput", "rawReplyOutput", "traceCount", "refreshTracesButton", "traceList",
-      "traceEmpty", "traceError", "traceErrorTitle", "traceErrorMessage", "traceErrorAction",
+      "traceSearch", "traceIntentFilter", "traceFilterSummary", "traceEmpty", "traceEmptyTitle",
+      "traceEmptyMessage", "traceError", "traceErrorTitle", "traceErrorMessage", "traceErrorAction",
       "traceDetail", "traceDetailEmpty", "traceDetailContent", "traceDetailTime",
       "traceDetailTitle", "traceDetailIntent", "traceDetailMessage", "traceSections",
       "rawTraceOutput", "tokenDialog", "tokenForm", "closeTokenButton", "accessToken",
-      "showToken", "tokenDialogStatus", "clearTokenButton",
+      "showToken", "tokenDialogStatus", "clearTokenButton", "refreshRuntimeButton",
+      "runtimeDetails", "runtimeRecoverySteps", "runtimeRawOutput",
     ];
     ids.forEach((id) => {
       elements[id] = document.getElementById(id);
@@ -115,8 +137,14 @@
   }
 
   function bindEvents() {
+    document.querySelectorAll("[data-view]").forEach((button) => {
+      button.addEventListener("click", () => activateView(button.dataset.view, { updateHash: true, focus: true }));
+    });
+    window.addEventListener("hashchange", () => activateView(viewFromHash(), { updateHash: false, focus: true }));
     elements.refreshAllButton.addEventListener("click", () => loadDashboard(true));
+    elements.refreshRuntimeButton.addEventListener("click", () => loadDashboard(true));
     elements.refreshTracesButton.addEventListener("click", () => loadTraces(true));
+    elements.openRuntimeButton.addEventListener("click", () => activateView("runtime", { updateHash: true, focus: true }));
     elements.dismissNoticeButton.addEventListener("click", hideNotice);
     elements.openTokenButton.addEventListener("click", () => showTokenDialog());
     elements.closeTokenButton.addEventListener("click", closeTokenDialog);
@@ -140,6 +168,9 @@
     elements.replyForm.addEventListener("submit", submitReply);
     elements.replyForm.addEventListener("reset", () => window.setTimeout(resetReplyView, 0));
     elements.copyReplyButton.addEventListener("click", copyReply);
+    elements.openLatestTraceButton.addEventListener("click", openLatestTrace);
+    elements.traceSearch.addEventListener("input", applyTraceFilters);
+    elements.traceIntentFilter.addEventListener("change", applyTraceFilters);
     elements.traceList.addEventListener("click", selectTraceFromEvent);
     elements.traceErrorAction.addEventListener("click", () => {
       if (state.traceErrorIsAuth) {
@@ -149,6 +180,64 @@
         loadTraces(true);
       }
     });
+  }
+
+  function viewFromHash() {
+    const candidate = window.location.hash.replace(/^#/, "");
+    return Object.prototype.hasOwnProperty.call(viewMetadata, candidate) ? candidate : "workbench";
+  }
+
+  function activateView(view, options) {
+    const targetView = Object.prototype.hasOwnProperty.call(viewMetadata, view) ? view : "workbench";
+    const settings = { updateHash: false, focus: false, ...(options || {}) };
+    const previousView = state.activeView;
+    if (previousView !== targetView && Object.prototype.hasOwnProperty.call(viewMetadata, previousView)) {
+      state.viewScrollPositions[previousView] = window.scrollY;
+    }
+    state.activeView = targetView;
+
+    document.querySelectorAll("[data-workspace-view]").forEach((section) => {
+      section.hidden = section.dataset.workspaceView !== targetView;
+    });
+    document.querySelectorAll("[data-view]").forEach((button) => {
+      const active = button.dataset.view === targetView;
+      if (active) {
+        button.setAttribute("aria-current", "page");
+      } else {
+        button.removeAttribute("aria-current");
+      }
+    });
+
+    const metadata = viewMetadata[targetView];
+    elements.pageEyebrow.textContent = metadata.eyebrow;
+    elements.pageTitle.textContent = metadata.title;
+    elements.openRuntimeButton.hidden = targetView === "runtime";
+    document.title = `${metadata.title} | 闲鱼卖家 Agent 操作台`;
+
+    if (settings.updateHash && window.location.hash !== `#${targetView}`) {
+      window.history.pushState(null, "", `#${targetView}`);
+    }
+    if (previousView !== targetView || settings.focus) {
+      window.requestAnimationFrame(() => {
+        if (settings.focus) {
+          elements.pageTitle.focus({ preventScroll: true });
+        }
+        if (previousView !== targetView) {
+          window.requestAnimationFrame(() => {
+            window.scrollTo(0, state.viewScrollPositions[targetView] || 0);
+          });
+        }
+      });
+    }
+  }
+
+  function openLatestTrace() {
+    const latest = state.traces[0];
+    elements.traceSearch.value = "";
+    elements.traceIntentFilter.value = "";
+    state.selectedTraceTimestamp = latest ? latest.timestamp : null;
+    applyTraceFilters();
+    activateView("traces", { updateHash: true, focus: true });
   }
 
   async function loadDashboard(announce) {
@@ -202,6 +291,7 @@
         element.classList.add("skeleton-text");
       });
     elements.overviewUpdatedAt.textContent = "正在读取本地运行快照";
+    elements.sidebarRuntimeState.textContent = "检查中";
   }
 
   function renderOverview(data) {
@@ -247,6 +337,11 @@
 
     elements.metricGrid.setAttribute("aria-busy", "false");
     elements.overviewUpdatedAt.textContent = `页面更新于 ${formatDateTime(Date.now())}`;
+    elements.sidebarRuntimeState.textContent = workerSnapshot.last_error_type === "XianyuRiskControlError"
+      ? "平台风控"
+      : worker.healthy ? "运行正常" : stateLabel;
+    elements.sidebarTraceCount.textContent = `${sampleSize} 条`;
+    renderRuntimeState(worker, workerSnapshot, stateLabel, reasonLabel, lastHeartbeat);
 
     if (state.access.tokenRequired && !getToken()) {
       showNotice("API 已启用访问保护", "运行总览可见，模拟回复和 Trace 需要先设置访问令牌。", "warning");
@@ -267,7 +362,94 @@
     elements.guardrailMetricNote.textContent = "未取得统计数据";
     elements.metricGrid.setAttribute("aria-busy", "false");
     elements.overviewUpdatedAt.textContent = "本次读取失败";
+    elements.sidebarRuntimeState.textContent = "读取失败";
+    elements.runtimeAlert.hidden = false;
+    elements.runtimeAlert.dataset.tone = "error";
+    elements.runtimeAlertLabel.textContent = "API 连接失败";
+    elements.runtimeAlertTitle.textContent = "本地操作台无法读取运行状态";
+    elements.runtimeAlertMessage.textContent = "请确认 API 已启动，然后刷新状态。";
+    elements.runtimeDetails.replaceChildren();
+    elements.runtimeRecoverySteps.replaceChildren();
+    elements.runtimeRawOutput.textContent = "";
     showNotice("无法连接本地 API", describeGenericError(error), "error");
+  }
+
+  function renderRuntimeState(worker, workerSnapshot, stateLabel, reasonLabel, lastHeartbeat) {
+    const errorType = workerSnapshot.last_error_type || "";
+    const errorLabel = workerErrorLabels[errorType] || errorType || "无";
+    const ageLabel = worker.age_seconds == null ? "未知" : `${formatDuration(worker.age_seconds * 1000)}前`;
+    const updatedAt = workerSnapshot.updated_at || null;
+
+    renderDataList(elements.runtimeDetails, {
+      "Worker 状态": stateLabel,
+      "健康判断": worker.healthy ? "正常" : reasonLabel,
+      "发送模式": workerSnapshot.dry_run === true ? "Dry-run" : workerSnapshot.dry_run === false ? "真实发送" : "未知",
+      "最近错误": errorLabel,
+      "快照时间": updatedAt ? formatDateTime(updatedAt) : "未记录",
+      "快照距今": ageLabel,
+      "最近心跳": lastHeartbeat ? formatDateTime(lastHeartbeat) : "未记录",
+      "重连次数": workerSnapshot.reconnect_attempt ?? 0,
+      "进程 PID": workerSnapshot.pid || "未记录",
+    });
+    elements.runtimeRawOutput.textContent = JSON.stringify(worker, null, 2);
+
+    let steps = [
+      "保持 Dry-run，先在回复工作台验证价格、事实与话术。",
+      "刷新运行状态，确认 Worker 心跳与快照持续更新。",
+      "只有在登录态、规则和 Trace 均正常后，才评估真实发送。",
+    ];
+
+    if (errorType === "XianyuRiskControlError") {
+      steps = [
+        "在闲鱼官方页面确认当前账号能够正常访问，并完成平台要求的验证。",
+        "更新本地登录态后重启 Worker，再刷新本页确认心跳恢复。",
+        "先保持 Dry-run 完成一次回复试跑，不要在风控未解除时反复重连。",
+      ];
+    } else if (workerSnapshot.state === "auth_failed") {
+      steps = [
+        "在闲鱼官方页面确认账号登录仍然有效。",
+        "更新本地登录态并重启 Worker。",
+        "刷新本页，确认状态变为“已连接”后再继续。",
+      ];
+    } else if (worker.reason === "status_stale") {
+      steps = [
+        "确认 Worker 进程仍在运行，并检查最近一条本地日志。",
+        "重启 Worker 后刷新本页，观察快照时间与心跳是否推进。",
+        "恢复前保持 Dry-run，避免使用过期状态判断真实发送能力。",
+      ];
+    }
+    renderRecoverySteps(steps);
+
+    if (!worker.healthy) {
+      const riskControl = errorType === "XianyuRiskControlError";
+      elements.runtimeAlert.hidden = false;
+      elements.runtimeAlert.dataset.tone = worker.reason === "status_missing" ? "warning" : "error";
+      elements.runtimeAlertLabel.textContent = riskControl ? "平台风控" : "Worker 异常";
+      elements.runtimeAlertTitle.textContent = riskControl
+        ? "闲鱼风控验证阻断了 Worker"
+        : `${stateLabel}，当前不能视为可用`;
+      elements.runtimeAlertMessage.textContent = riskControl
+        ? `最近错误为 ${errorLabel}，快照更新于 ${ageLabel}。先完成官方验证，再更新登录态并重启 Worker。`
+        : `${reasonLabel}，快照更新于 ${ageLabel}。打开运行状态可查看错误、心跳与恢复步骤。`;
+    } else if (workerSnapshot.dry_run === false) {
+      elements.runtimeAlert.hidden = false;
+      elements.runtimeAlert.dataset.tone = "warning";
+      elements.runtimeAlertLabel.textContent = "真实发送";
+      elements.runtimeAlertTitle.textContent = "Worker 已开启真实发送";
+      elements.runtimeAlertMessage.textContent = "回复工作台仍只做模拟，但在线 Worker 可能触达买家。操作前请确认规则与登录态。";
+    } else {
+      elements.runtimeAlert.hidden = true;
+      delete elements.runtimeAlert.dataset.tone;
+    }
+  }
+
+  function renderRecoverySteps(steps) {
+    elements.runtimeRecoverySteps.replaceChildren();
+    steps.forEach((step) => {
+      const item = document.createElement("li");
+      item.textContent = step;
+      elements.runtimeRecoverySteps.append(item);
+    });
   }
 
   async function loadTraces(announce) {
@@ -277,7 +459,8 @@
       const records = Array.isArray(data.items) ? data.items.slice().reverse() : [];
       state.traces = records;
       state.traceErrorIsAuth = false;
-      renderTraceList(records);
+      elements.sidebarTraceCount.textContent = `${records.length} 条`;
+      applyTraceFilters();
       if (announce) {
         showNotice("Trace 已刷新", records.length ? `已读取最近 ${records.length} 条记录。` : "当前还没有 Trace。", "ok", 2800);
       }
@@ -303,13 +486,48 @@
     }
   }
 
+  function applyTraceFilters() {
+    const query = elements.traceSearch.value.trim().toLocaleLowerCase("zh-CN");
+    const intent = elements.traceIntentFilter.value;
+    const records = state.traces.filter((record) => {
+      const trace = record && record.trace ? record.trace : {};
+      if (intent && trace.intent !== intent) {
+        return false;
+      }
+      if (!query) {
+        return true;
+      }
+      const searchable = [
+        trace.user_msg,
+        trace.chat_id,
+        trace.routed_agent,
+        trace.intent,
+        intentLabels[trace.intent],
+        ...(Array.isArray(trace.guardrails) ? trace.guardrails : []),
+      ].filter(Boolean).join(" ").toLocaleLowerCase("zh-CN");
+      return searchable.includes(query);
+    });
+    renderTraceList(records);
+    elements.traceFilterSummary.textContent = state.traces.length === records.length
+      ? `共 ${records.length} 条决策`
+      : `显示 ${records.length} / ${state.traces.length} 条`;
+  }
+
   function renderTraceList(records) {
+    state.visibleTraces = records;
     elements.traceList.replaceChildren();
     elements.traceError.hidden = true;
-    elements.traceCount.textContent = `${records.length} 条`;
+    elements.traceCount.textContent = state.traces.length === records.length
+      ? `${records.length} 条`
+      : `${records.length} / ${state.traces.length} 条`;
 
     if (records.length === 0) {
       elements.traceEmpty.hidden = false;
+      const filtered = state.traces.length > 0;
+      elements.traceEmptyTitle.textContent = filtered ? "没有匹配的决策" : "暂无 Trace";
+      elements.traceEmptyMessage.textContent = filtered
+        ? "调整搜索词或意图筛选后再试。"
+        : "完成一次模拟回复后，新的决策记录会出现在这里。";
       clearTraceDetail();
       return;
     }
@@ -320,6 +538,8 @@
       const button = document.createElement("button");
       const top = document.createElement("span");
       const title = document.createElement("span");
+      const titleGroup = document.createElement("span");
+      const statusBadge = document.createElement("span");
       const time = document.createElement("time");
       const message = document.createElement("span");
       const meta = document.createElement("span");
@@ -333,11 +553,16 @@
       button.setAttribute("aria-current", String(selected));
       top.className = "trace-item-top";
       title.className = "trace-item-title";
+      titleGroup.className = "trace-item-title-group";
+      statusBadge.className = "trace-row-status";
       time.className = "trace-item-time";
       message.className = "trace-item-message";
       meta.className = "trace-item-meta";
 
       title.textContent = intentLabels[trace.intent] || trace.intent || "未知意图";
+      const traceStatus = getTraceStatus(trace);
+      statusBadge.textContent = traceStatus.label;
+      statusBadge.dataset.tone = traceStatus.tone;
       time.textContent = formatRelativeTime(record.timestamp);
       time.dateTime = record.timestamp || "";
       message.textContent = trace.user_msg || "未记录买家消息";
@@ -345,7 +570,8 @@
         makeTextSpan(trace.routed_agent || "未记录路由"),
         makeTextSpan(trace.chat_id || "无会话 ID"),
       );
-      top.append(title, time);
+      titleGroup.append(title, statusBadge);
+      top.append(titleGroup, time);
       button.append(top, message, meta);
       elements.traceList.append(button);
     });
@@ -364,26 +590,44 @@
       return;
     }
     const index = Number(button.dataset.traceIndex);
-    if (!Number.isInteger(index) || !state.traces[index]) {
+    if (!Number.isInteger(index) || !state.visibleTraces[index]) {
       return;
     }
     markSelectedTrace(index);
-    renderTraceDetail(state.traces[index]);
+    renderTraceDetail(state.visibleTraces[index]);
   }
 
   function markSelectedTrace(index) {
-    const record = state.traces[index];
+    const record = state.visibleTraces[index];
     state.selectedTraceTimestamp = record ? record.timestamp : null;
     elements.traceList.querySelectorAll(".trace-item").forEach((item, itemIndex) => {
       item.setAttribute("aria-current", String(itemIndex === index));
     });
   }
 
+  function getTraceStatus(trace) {
+    const ruleViolations = trace.rules && Array.isArray(trace.rules.violations) ? trace.rules.violations : [];
+    const styleViolations = trace.style && Array.isArray(trace.style.unresolved_violations)
+      ? trace.style.unresolved_violations
+      : [];
+    if (trace.no_reply === true) {
+      return { label: "已拦截", tone: "warning" };
+    }
+    if ((trace.rules && trace.rules.safe === false) || (trace.style && trace.style.safe === false)
+      || ruleViolations.length > 0 || styleViolations.length > 0) {
+      return { label: "需复核", tone: "warning" };
+    }
+    return { label: "已通过", tone: "ok" };
+  }
+
   function renderTraceError(error) {
+    state.visibleTraces = [];
     elements.traceList.replaceChildren();
     elements.traceEmpty.hidden = true;
     elements.traceError.hidden = false;
     elements.traceCount.textContent = "读取失败";
+    elements.traceFilterSummary.textContent = "Trace 读取失败";
+    elements.sidebarTraceCount.textContent = "读取失败";
     state.traceErrorIsAuth = error instanceof ApiError && error.status === 401;
 
     if (state.traceErrorIsAuth) {
@@ -593,6 +837,7 @@
     elements.resultLoading.hidden = true;
     elements.resultContent.hidden = false;
     elements.copyReplyButton.hidden = false;
+    elements.openLatestTraceButton.hidden = false;
     elements.replyOutput.textContent = response.reply === "-" ? "本轮无需回复" : response.reply || "未返回回复内容";
     elements.resultBadges.replaceChildren(
       makeBadge(intentLabels[response.intent] || response.intent || "未知意图", "neutral"),
@@ -758,6 +1003,8 @@
     elements.resultEmpty.hidden = loading || Boolean(state.latestReply);
     elements.resultLoading.hidden = !loading;
     elements.resultLoading.setAttribute("aria-hidden", String(!loading));
+    elements.copyReplyButton.hidden = loading || !state.latestReply;
+    elements.openLatestTraceButton.hidden = loading || !state.latestReply;
     document.querySelector(".result-panel").setAttribute("aria-busy", String(loading));
   }
 
@@ -767,6 +1014,7 @@
     elements.resultLoading.hidden = true;
     elements.resultEmpty.hidden = false;
     elements.copyReplyButton.hidden = true;
+    elements.openLatestTraceButton.hidden = true;
     clearReplyFeedback();
     clearAllFieldErrors();
     updateMessageCount();
