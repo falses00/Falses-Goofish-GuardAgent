@@ -100,6 +100,14 @@ Desktop uses a 238px persistent sidebar and a compact sticky top bar. Screens at
 - Text wraps before it shrinks. Tables scroll inside their own container; the page itself must not overflow horizontally.
 - Verify at 390x844, 1024x768, and 1440x900 in both themes where relevant.
 
+## Human Takeover Workspace
+
+- Human takeover is an operational control, not a decorative dashboard statistic. It has a dedicated workspace with one bounded form, an active queue, and an audit log.
+- Active rows show the exact `chat_id`, optional `item_id`, remaining TTL, expiry time, and operator note. All values wrap before controls move.
+- Resuming automation uses a danger-quiet action plus explicit confirmation because it re-enables buyer-facing side effects.
+- Loading, no-active-session, authentication error, API error, successful mutation, and expired states each have a stable visible treatment.
+- At tablet width the form loses sticky positioning; at mobile width each active row becomes a vertical action block and the audit log becomes one column.
+
 ## Prohibited Patterns
 
 - No marketing hero, oversized slogan, decorative orb, glass panel, bokeh, or one-hue gradient theme.

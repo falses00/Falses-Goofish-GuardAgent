@@ -84,7 +84,8 @@ class ChatContextManager:
             role TEXT NOT NULL,
             content TEXT NOT NULL,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            chat_id TEXT
+            chat_id TEXT,
+            source_message_id TEXT
         )
         ''')
 
@@ -94,6 +95,9 @@ class ChatContextManager:
         if 'chat_id' not in columns:
             cursor.execute('ALTER TABLE messages ADD COLUMN chat_id TEXT')
             logger.info("已为messages表添加chat_id字段")
+        if 'source_message_id' not in columns:
+            cursor.execute('ALTER TABLE messages ADD COLUMN source_message_id TEXT')
+            logger.info("已为 messages 表添加 source_message_id 字段")
 
         # 创建索引以加速查询
         cursor.execute('''
@@ -106,6 +110,10 @@ class ChatContextManager:
 
         cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_timestamp ON messages (timestamp)
+        ''')
+
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_messages_source ON messages (source_message_id)
         ''')
 
         # 创建基于会话ID的议价次数表
@@ -128,6 +136,20 @@ class ChatContextManager:
         if 'buyer_highest_offer' not in bargain_columns:
             cursor.execute('ALTER TABLE chat_bargain_counts ADD COLUMN buyer_highest_offer REAL')
             logger.info("已为 chat_bargain_counts 表添加 buyer_highest_offer 字段")
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS committed_source_turns (
+            source_message_id TEXT PRIMARY KEY,
+            chat_id TEXT NOT NULL,
+            commit_level TEXT NOT NULL CHECK(commit_level IN ('user_only', 'full')),
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_committed_source_turns_chat
+        ON committed_source_turns (chat_id)
+        ''')
 
         # 创建商品信息表
         cursor.execute('''
@@ -245,9 +267,21 @@ class ChatContextManager:
         finally:
             conn.close()
 
-    def append_turn(self, chat_id, user_id, item_id, user_text, assistant_id, assistant_text=None, intent=None):
+    def append_turn(
+        self,
+        chat_id,
+        user_id,
+        item_id,
+        user_text,
+        assistant_id,
+        assistant_text=None,
+        intent=None,
+        lowest_price_committed=None,
+        buyer_highest_offer=None,
+    ):
         """
-        Atomically append one user turn, optional assistant reply, and bargain counter update.
+        Atomically append one user turn, optional assistant reply, bargain counter,
+        and monotonic price commitments.
 
         This avoids half-written memory such as a user message without its assistant reply,
         or a reply recorded without the matching bargain-count transition.
@@ -271,12 +305,37 @@ class ChatContextManager:
             if intent == "price":
                 cursor.execute(
                     """
-                    INSERT INTO chat_bargain_counts (chat_id, count, last_updated)
-                    VALUES (?, 1, ?)
+                    INSERT INTO chat_bargain_counts (
+                        chat_id, count, lowest_price_committed, buyer_highest_offer, last_updated
+                    )
+                    VALUES (?, 1, ?, ?, ?)
                     ON CONFLICT(chat_id)
-                    DO UPDATE SET count = count + 1, last_updated = ?
+                    DO UPDATE SET
+                        count = chat_bargain_counts.count + 1,
+                        lowest_price_committed = CASE
+                            WHEN excluded.lowest_price_committed IS NULL
+                                THEN chat_bargain_counts.lowest_price_committed
+                            WHEN chat_bargain_counts.lowest_price_committed IS NULL
+                                OR excluded.lowest_price_committed < chat_bargain_counts.lowest_price_committed
+                                THEN excluded.lowest_price_committed
+                            ELSE chat_bargain_counts.lowest_price_committed
+                        END,
+                        buyer_highest_offer = CASE
+                            WHEN excluded.buyer_highest_offer IS NULL
+                                THEN chat_bargain_counts.buyer_highest_offer
+                            WHEN chat_bargain_counts.buyer_highest_offer IS NULL
+                                OR excluded.buyer_highest_offer > chat_bargain_counts.buyer_highest_offer
+                                THEN excluded.buyer_highest_offer
+                            ELSE chat_bargain_counts.buyer_highest_offer
+                        END,
+                        last_updated = excluded.last_updated
                     """,
-                    (chat_id, datetime.now().isoformat(), datetime.now().isoformat())
+                    (
+                        chat_id,
+                        lowest_price_committed,
+                        buyer_highest_offer,
+                        datetime.now().isoformat(),
+                    ),
                 )
 
             self._trim_messages_by_chat(cursor, chat_id)
@@ -284,6 +343,141 @@ class ChatContextManager:
             logger.debug(f"已原子追加会话轮次: chat_id={chat_id}, intent={intent}")
         except Exception as e:
             logger.error(f"追加会话轮次时出错: {e}")
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def append_turn_once(
+        self,
+        source_message_id,
+        chat_id,
+        user_id,
+        item_id,
+        user_text,
+        assistant_id,
+        assistant_text=None,
+        intent=None,
+        lowest_price_committed=None,
+        buyer_highest_offer=None,
+    ):
+        """Commit one source event once, allowing a user-only turn to upgrade after a real send."""
+        if not source_message_id:
+            raise ValueError("source_message_id is required for an idempotent turn commit")
+
+        target_level = "full" if assistant_text and assistant_text != "-" else "user_only"
+        conn = self._connect()
+        cursor = conn.cursor()
+        now = datetime.now().isoformat()
+
+        try:
+            cursor.execute("BEGIN IMMEDIATE")
+            cursor.execute(
+                "SELECT commit_level FROM committed_source_turns WHERE source_message_id = ?",
+                (source_message_id,),
+            )
+            row = cursor.fetchone()
+            current_level = row[0] if row else None
+            if current_level == "full" or current_level == target_level:
+                conn.commit()
+                return False
+
+            include_user = current_level is None
+            if current_level == "user_only" and target_level == "full":
+                cursor.execute(
+                    """
+                    SELECT 1 FROM messages
+                    WHERE chat_id = ? AND source_message_id = ? AND role = 'user'
+                    LIMIT 1
+                    """,
+                    (chat_id, source_message_id),
+                )
+                include_user = cursor.fetchone() is None
+            if include_user:
+                cursor.execute(
+                    """
+                    INSERT INTO messages (
+                        user_id, item_id, role, content, timestamp, chat_id, source_message_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (user_id, item_id, "user", user_text, now, chat_id, source_message_id),
+                )
+
+            if target_level == "full":
+                cursor.execute(
+                    """
+                    INSERT INTO messages (
+                        user_id, item_id, role, content, timestamp, chat_id, source_message_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        assistant_id,
+                        item_id,
+                        "assistant",
+                        assistant_text,
+                        datetime.now().isoformat(),
+                        chat_id,
+                        source_message_id,
+                    ),
+                )
+                if intent == "price":
+                    cursor.execute(
+                        """
+                        INSERT INTO chat_bargain_counts (
+                            chat_id, count, lowest_price_committed, buyer_highest_offer, last_updated
+                        )
+                        VALUES (?, 1, ?, ?, ?)
+                        ON CONFLICT(chat_id)
+                        DO UPDATE SET
+                            count = chat_bargain_counts.count + 1,
+                            lowest_price_committed = CASE
+                                WHEN excluded.lowest_price_committed IS NULL
+                                    THEN chat_bargain_counts.lowest_price_committed
+                                WHEN chat_bargain_counts.lowest_price_committed IS NULL
+                                    OR excluded.lowest_price_committed < chat_bargain_counts.lowest_price_committed
+                                    THEN excluded.lowest_price_committed
+                                ELSE chat_bargain_counts.lowest_price_committed
+                            END,
+                            buyer_highest_offer = CASE
+                                WHEN excluded.buyer_highest_offer IS NULL
+                                    THEN chat_bargain_counts.buyer_highest_offer
+                                WHEN chat_bargain_counts.buyer_highest_offer IS NULL
+                                    OR excluded.buyer_highest_offer > chat_bargain_counts.buyer_highest_offer
+                                    THEN excluded.buyer_highest_offer
+                                ELSE chat_bargain_counts.buyer_highest_offer
+                            END,
+                            last_updated = excluded.last_updated
+                        """,
+                        (chat_id, lowest_price_committed, buyer_highest_offer, now),
+                    )
+
+            if current_level is None:
+                cursor.execute(
+                    """
+                    INSERT INTO committed_source_turns (
+                        source_message_id, chat_id, commit_level, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (source_message_id, chat_id, target_level, now, now),
+                )
+            else:
+                cursor.execute(
+                    """
+                    UPDATE committed_source_turns
+                    SET commit_level = 'full', updated_at = ?
+                    WHERE source_message_id = ? AND commit_level = 'user_only'
+                    """,
+                    (now, source_message_id),
+                )
+
+            self._trim_messages_by_chat(cursor, chat_id)
+            conn.commit()
+            logger.debug(
+                f"已幂等提交会话轮次: chat_id={chat_id}, source={source_message_id}, level={target_level}"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"幂等提交会话轮次时出错: {e}")
             conn.rollback()
             raise
         finally:

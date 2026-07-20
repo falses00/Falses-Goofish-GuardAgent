@@ -14,6 +14,11 @@
       eyebrow: "Safe simulation",
       description: "输入真实买家问题，在不触达闲鱼的前提下检查回复与护栏。",
     },
+    takeovers: {
+      title: "人工接管",
+      eyebrow: "Human in the loop",
+      description: "按会话暂停自动决策与待发送回复，并保留跨重启审计记录。",
+    },
     traces: {
       title: "决策记录",
       eyebrow: "Decision database",
@@ -91,13 +96,15 @@
     access: { tokenRequired: false, docsEnabled: false },
     overview: null,
     traces: [],
+    takeovers: [],
+    takeoverEvents: [],
     visibleTraces: [],
     selectedTraceTimestamp: null,
     latestReply: null,
     retryAfterToken: null,
     traceErrorIsAuth: false,
     activeView: "dashboard",
-    viewScrollPositions: { dashboard: 0, workbench: 0, traces: 0, runtime: 0 },
+    viewScrollPositions: { dashboard: 0, workbench: 0, takeovers: 0, traces: 0, runtime: 0 },
   };
 
   const elements = {};
@@ -128,7 +135,7 @@
 
   function cacheElements() {
     const ids = [
-      "pageEyebrow", "pageTitle", "pageDescription", "sidebarOverviewState", "sidebarTraceCount", "sidebarRuntimeState",
+      "pageEyebrow", "pageTitle", "pageDescription", "sidebarOverviewState", "sidebarTraceCount", "sidebarTakeoverCount", "sidebarRuntimeState",
       "apiStatus", "workerStatus", "modeStatus", "refreshAllButton", "openTokenButton",
       "themeToggleButton", "globalSearch", "mobileNavButton", "closeSidebarButton", "mobileNavBackdrop",
       "appSidebar", "appWorkspace",
@@ -153,6 +160,10 @@
       "runtimeDetails", "runtimeRecoverySteps", "runtimeRawOutput",
       "dashboardSafeRate", "dashboardSafeRateNote", "dashboardIntentBars", "dashboardTraceTable",
       "dashboardActivityList", "dashboardFocusStatus", "dashboardFocusTitle", "dashboardFocusMessage",
+      "takeoverForm", "takeoverChatId", "takeoverItemId", "takeoverTtl", "takeoverNote",
+      "takeoverSubmitButton", "takeoverFeedback", "takeoverCount", "refreshTakeoversButton",
+      "takeoverList", "takeoverEmpty", "takeoverError", "takeoverErrorTitle", "takeoverErrorMessage",
+      "takeoverErrorAction", "takeoverEvents",
     ];
     ids.forEach((id) => {
       elements[id] = document.getElementById(id);
@@ -180,6 +191,7 @@
     elements.refreshAllButton.addEventListener("click", () => loadDashboard(true));
     elements.refreshRuntimeButton.addEventListener("click", () => loadDashboard(true));
     elements.refreshTracesButton.addEventListener("click", () => loadTraces(true));
+    elements.refreshTakeoversButton.addEventListener("click", () => loadTakeovers(true));
     elements.openRuntimeButton.addEventListener("click", () => activateView("runtime", { updateHash: true, focus: true }));
     elements.dismissNoticeButton.addEventListener("click", hideNotice);
     elements.openTokenButton.addEventListener("click", () => showTokenDialog());
@@ -202,6 +214,16 @@
     elements.conversationContext.addEventListener("input", () => clearFieldError(elements.conversationContext, elements.contextError));
     elements.generateRequestIdButton.addEventListener("click", generateRequestId);
     elements.replyForm.addEventListener("submit", submitReply);
+    elements.takeoverForm.addEventListener("submit", submitTakeover);
+    elements.takeoverList.addEventListener("click", releaseTakeoverFromEvent);
+    elements.takeoverErrorAction.addEventListener("click", () => {
+      if (state.access.tokenRequired && !getToken()) {
+        state.retryAfterToken = () => loadTakeovers(true);
+        showTokenDialog("管理人工接管需要有效令牌。");
+      } else {
+        loadTakeovers(true).catch(() => {});
+      }
+    });
     elements.replyForm.addEventListener("reset", () => window.setTimeout(resetReplyView, 0));
     elements.copyReplyButton.addEventListener("click", copyReply);
     elements.openLatestTraceButton.addEventListener("click", openLatestTrace);
@@ -414,16 +436,24 @@
       showNotice("无法读取访问策略", describeGenericError(error), "error");
     }
 
-    const traceRequest = state.access.tokenRequired && !getToken()
+    const missingRequiredToken = state.access.tokenRequired && !getToken();
+    const traceRequest = missingRequiredToken
       ? Promise.resolve().then(() => {
         renderTraceError(new ApiError(401, { detail: "invalid_or_missing_access_token" }), { promptAuth: false });
         setTraceLoading(false);
         return {};
       })
       : loadTraces(false);
+    const takeoverRequest = missingRequiredToken
+      ? Promise.resolve().then(() => {
+        renderTakeoverError(new ApiError(401, { detail: "invalid_or_missing_access_token" }));
+        return {};
+      })
+      : loadTakeovers(false);
     const results = await Promise.allSettled([
       apiFetch("/api/overview"),
       traceRequest,
+      takeoverRequest,
     ]);
 
     if (results[0].status === "fulfilled") {
@@ -616,6 +646,184 @@
       item.textContent = step;
       elements.runtimeRecoverySteps.append(item);
     });
+  }
+
+  async function loadTakeovers(announce) {
+    elements.takeoverList.setAttribute("aria-busy", "true");
+    elements.takeoverError.hidden = true;
+    setButtonBusy(elements.refreshTakeoversButton, true, "刷新中…");
+    try {
+      const [active, events] = await Promise.all([
+        apiFetch("/api/takeovers?active_only=true&limit=100"),
+        apiFetch("/api/takeovers/events?limit=30"),
+      ]);
+      state.takeovers = Array.isArray(active.items) ? active.items : [];
+      state.takeoverEvents = Array.isArray(events.items) ? events.items : [];
+      renderTakeovers();
+      if (announce) {
+        showNotice("接管状态已刷新", `当前有 ${state.takeovers.length} 个会话由人工处理。`, "ok", 2800);
+      }
+      return active;
+    } catch (error) {
+      renderTakeoverError(error);
+      throw error;
+    } finally {
+      elements.takeoverList.setAttribute("aria-busy", "false");
+      setButtonBusy(elements.refreshTakeoversButton, false);
+    }
+  }
+
+  function renderTakeovers() {
+    elements.takeoverList.replaceChildren();
+    elements.takeoverError.hidden = true;
+    elements.takeoverEmpty.hidden = state.takeovers.length > 0;
+    elements.takeoverCount.textContent = `${state.takeovers.length} 个会话`;
+    elements.sidebarTakeoverCount.textContent = `${state.takeovers.length} 个`;
+
+    state.takeovers.forEach((takeover) => {
+      const row = document.createElement("article");
+      row.className = "takeover-row";
+      const main = document.createElement("div");
+      main.className = "takeover-row-main";
+      const heading = document.createElement("div");
+      heading.className = "takeover-row-heading";
+      const title = document.createElement("strong");
+      title.textContent = takeover.chat_id;
+      heading.append(title, makeBadge("人工处理中", "warning"));
+      const meta = document.createElement("p");
+      const remaining = formatDuration(numberOrZero(takeover.remaining_seconds) * 1000);
+      meta.textContent = `${takeover.item_id ? `商品 ${takeover.item_id} · ` : ""}剩余 ${remaining} · ${formatDateTime(takeover.expires_at)} 到期`;
+      main.append(heading, meta);
+      if (takeover.note) {
+        const note = document.createElement("p");
+        note.className = "takeover-row-note";
+        note.textContent = takeover.note;
+        main.append(note);
+      }
+      const release = document.createElement("button");
+      release.type = "button";
+      release.className = "button button-danger-quiet button-compact";
+      release.dataset.releaseTakeover = takeover.chat_id;
+      release.textContent = "恢复自动回复";
+      row.append(main, release);
+      elements.takeoverList.append(row);
+    });
+
+    renderTakeoverEvents();
+  }
+
+  function renderTakeoverEvents() {
+    const actionLabels = { enabled: "开始接管", extended: "延长接管", disabled: "恢复自动", expired: "到期恢复" };
+    elements.takeoverEvents.replaceChildren();
+    if (!state.takeoverEvents.length) {
+      const empty = document.createElement("p");
+      empty.className = "takeover-events-empty";
+      empty.textContent = "尚无接管操作记录。";
+      elements.takeoverEvents.append(empty);
+      return;
+    }
+    state.takeoverEvents.forEach((event) => {
+      const row = document.createElement("div");
+      row.className = "takeover-event-row";
+      const marker = document.createElement("span");
+      marker.className = "takeover-event-marker";
+      marker.dataset.action = event.action;
+      const copy = document.createElement("div");
+      const title = document.createElement("strong");
+      title.textContent = `${actionLabels[event.action] || event.action} · ${event.chat_id}`;
+      const detail = document.createElement("p");
+      detail.textContent = `${event.source || "unknown"}${event.note ? ` · ${event.note}` : ""}`;
+      const time = document.createElement("time");
+      time.dateTime = event.occurred_at || "";
+      time.textContent = formatRelativeTime(event.occurred_at);
+      copy.append(title, detail);
+      row.append(marker, copy, time);
+      elements.takeoverEvents.append(row);
+    });
+  }
+
+  function renderTakeoverError(error) {
+    state.takeovers = [];
+    state.takeoverEvents = [];
+    elements.takeoverList.replaceChildren();
+    elements.takeoverEvents.replaceChildren();
+    elements.takeoverList.setAttribute("aria-busy", "false");
+    elements.takeoverEmpty.hidden = true;
+    elements.takeoverError.hidden = false;
+    elements.takeoverCount.textContent = "读取失败";
+    elements.sidebarTakeoverCount.textContent = "需处理";
+    const authError = error instanceof ApiError && error.status === 401;
+    elements.takeoverErrorTitle.textContent = authError ? "需要访问令牌" : "无法读取接管状态";
+    elements.takeoverErrorMessage.textContent = authError
+      ? "设置当前 API 的访问令牌后，才能管理人工接管。"
+      : describeGenericError(error);
+    elements.takeoverErrorAction.textContent = authError ? "设置令牌" : "重试";
+  }
+
+  async function submitTakeover(event) {
+    event.preventDefault();
+    if (!elements.takeoverForm.reportValidity()) {
+      return;
+    }
+    const chatId = elements.takeoverChatId.value.trim();
+    const payload = {
+      active: true,
+      item_id: elements.takeoverItemId.value.trim() || null,
+      ttl_seconds: Number(elements.takeoverTtl.value),
+      note: elements.takeoverNote.value.trim() || null,
+    };
+    setButtonBusy(elements.takeoverSubmitButton, true, "正在接管…");
+    setTakeoverFeedback("", "error");
+    try {
+      await apiFetch(`/api/takeovers/${encodeURIComponent(chatId)}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+      setTakeoverFeedback(`会话 ${chatId} 已切换为人工接管。`, "ok");
+      elements.takeoverChatId.value = "";
+      elements.takeoverItemId.value = "";
+      elements.takeoverNote.value = "";
+      await loadTakeovers(false);
+      showNotice("人工接管已生效", "Worker 将停止该会话的新决策和待发送回复。", "ok", 3600);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        state.retryAfterToken = () => submitTakeover(new Event("submit", { cancelable: true }));
+        showTokenDialog("创建人工接管需要有效令牌。保存后会重试。 ");
+      }
+      setTakeoverFeedback(describeGenericError(error), "error");
+    } finally {
+      setButtonBusy(elements.takeoverSubmitButton, false);
+    }
+  }
+
+  async function releaseTakeoverFromEvent(event) {
+    const button = event.target.closest("button[data-release-takeover]");
+    if (!button) {
+      return;
+    }
+    const chatId = button.dataset.releaseTakeover;
+    if (!window.confirm(`恢复会话 ${chatId} 的自动回复？后续买家消息将重新进入 Agent 决策链。`)) {
+      return;
+    }
+    setButtonBusy(button, true, "恢复中…");
+    try {
+      await apiFetch(`/api/takeovers/${encodeURIComponent(chatId)}`, { method: "DELETE" });
+      await loadTakeovers(false);
+      showNotice("已恢复自动回复", `会话 ${chatId} 已退出人工接管。`, "ok", 3200);
+    } catch (error) {
+      setButtonBusy(button, false);
+      if (error instanceof ApiError && error.status === 401) {
+        state.retryAfterToken = () => loadTakeovers(true);
+        showTokenDialog("恢复自动回复需要有效令牌。");
+      }
+      showNotice("恢复失败", describeGenericError(error), "error");
+    }
+  }
+
+  function setTakeoverFeedback(message, tone) {
+    elements.takeoverFeedback.textContent = message;
+    elements.takeoverFeedback.dataset.tone = tone || "error";
+    elements.takeoverFeedback.hidden = !message;
   }
 
   async function loadTraces(announce) {

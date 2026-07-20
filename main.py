@@ -17,6 +17,7 @@ from utils.xianyu_utils import generate_mid, generate_uuid, trans_cookies, gener
 from XianyuAgent import XianyuReplyBot
 from context_manager import ChatContextManager
 from core.message_aggregation import MessageAggregator
+from core.manual_takeover import ManualTakeoverStore
 from core.model_provider import has_model_api_key
 from core.reply_outbox import ReplyOutbox
 from core.runtime_config import diagnose_runtime
@@ -34,6 +35,7 @@ class XianyuLive:
         seller_id=None,
         reply_send_dry_run=None,
         runtime_status_store=None,
+        manual_takeover_store=None,
     ):
         self.xianyu = xianyu_api or XianyuApis()
         self.base_url = 'wss://wss-goofish.dingtalk.com/'
@@ -81,10 +83,9 @@ class XianyuLive:
         )
         self.runtime_status = runtime_status_store or NullRuntimeStatusStore()
 
-        # 人工接管相关配置
-        self.manual_mode_conversations = set()  # 存储处于人工接管模式的会话ID
-        self.manual_mode_timeout = int(os.getenv("MANUAL_MODE_TIMEOUT", "3600"))  # 人工接管超时时间，默认1小时
-        self.manual_mode_timestamps = {}  # 记录进入人工模式的时间
+        # API console and Worker share this durable source of truth.
+        self.manual_takeovers = manual_takeover_store or ManualTakeoverStore()
+        self.manual_mode_timeout = self.manual_takeovers.default_ttl_seconds
 
         # 消息过期时间配置
         self.message_expire_time = int(os.getenv("MESSAGE_EXPIRE_TIME", "300000"))  # 消息过期时间，默认5分钟
@@ -101,8 +102,13 @@ class XianyuLive:
         self.reply_send_dry_run = bool(reply_send_dry_run)
         self.reply_send_claim_timeout_seconds = int(os.getenv("REPLY_SEND_CLAIM_TIMEOUT_SECONDS", "300"))
 
-        # 人工接管关键词，从环境变量读取
-        self.toggle_keywords = os.getenv("TOGGLE_KEYWORDS", "。")
+        # Comma-separated exact messages avoid accidental substring toggles.
+        raw_toggle_keywords = os.getenv("TOGGLE_KEYWORDS", "。")
+        self.toggle_keywords = {
+            keyword.strip()
+            for keyword in re.split(r"[,，]", raw_toggle_keywords)
+            if keyword.strip()
+        } or {"。"}
 
         # 模拟人工输入配置
         self.simulate_human_typing = os.getenv("SIMULATE_HUMAN_TYPING", "False").lower() == "true"
@@ -363,43 +369,35 @@ class XianyuLive:
             return False
 
     def check_toggle_keywords(self, message):
-        """检查消息是否包含切换关键词"""
+        """Check whether the seller message exactly matches a takeover command."""
         message_stripped = message.strip()
         return message_stripped in self.toggle_keywords
 
     def is_manual_mode(self, chat_id):
         """检查特定会话是否处于人工接管模式"""
-        if chat_id not in self.manual_mode_conversations:
-            return False
+        return self.manual_takeovers.is_active(chat_id)
 
-        # 检查是否超时
-        current_time = time.time()
-        if chat_id in self.manual_mode_timestamps:
-            if current_time - self.manual_mode_timestamps[chat_id] > self.manual_mode_timeout:
-                # 超时，自动退出人工模式
-                self.exit_manual_mode(chat_id)
-                return False
-
-        return True
-
-    def enter_manual_mode(self, chat_id):
+    def enter_manual_mode(self, chat_id, item_id=None, source="seller_command", note=None):
         """进入人工接管模式"""
-        self.manual_mode_conversations.add(chat_id)
-        self.manual_mode_timestamps[chat_id] = time.time()
+        return self.manual_takeovers.enable(
+            chat_id,
+            item_id=item_id,
+            ttl_seconds=self.manual_mode_timeout,
+            source=source,
+            note=note,
+        )
 
-    def exit_manual_mode(self, chat_id):
+    def exit_manual_mode(self, chat_id, source="seller_command", note=None):
         """退出人工接管模式"""
-        self.manual_mode_conversations.discard(chat_id)
-        if chat_id in self.manual_mode_timestamps:
-            del self.manual_mode_timestamps[chat_id]
+        return self.manual_takeovers.disable(chat_id, source=source, note=note)
 
-    def toggle_manual_mode(self, chat_id):
+    def toggle_manual_mode(self, chat_id, item_id=None):
         """切换人工接管模式"""
         if self.is_manual_mode(chat_id):
             self.exit_manual_mode(chat_id)
             return "auto"
         else:
-            self.enter_manual_mode(chat_id)
+            self.enter_manual_mode(chat_id, item_id=item_id)
             return "manual"
 
     def format_price(self, price):
@@ -470,9 +468,21 @@ class XianyuLive:
             chat_id, item_id, send_user_id, send_message
         )
         dedupe_key = ReplyOutbox.build_dedupe_key(chat_id, item_id, send_user_id, source_message_id)
+        if self.is_manual_mode(chat_id):
+            self._suppress_for_manual_takeover(
+                chat_id,
+                send_user_id,
+                item_id,
+                send_message,
+                source_message_id,
+                dedupe_key,
+            )
+            return
+
         existing_record = self.reply_outbox.get(dedupe_key)
         if existing_record:
             if existing_record.status in {"sent", "skipped"}:
+                self._commit_outbox_memory(existing_record)
                 logger.info(
                     f"检测到已完成买家消息事件，跳过重复 Agent 决策: chat_id={chat_id}, "
                     f"item_id={item_id}, outbox_status={existing_record.status}"
@@ -512,9 +522,22 @@ class XianyuLive:
                 context=context,
                 chat_id=chat_id,
                 item_id=item_id,
+                persist_memory=False,
             )
             bot_intent = self.bot.last_intent
             bot_trace = self.bot.last_trace.to_dict()
+
+        # A console operator may take over while the model is still generating.
+        if self.is_manual_mode(chat_id):
+            self._suppress_for_manual_takeover(
+                chat_id,
+                send_user_id,
+                item_id,
+                send_message,
+                source_message_id,
+                dedupe_key,
+            )
+            return
 
         if aggregation_count > 1:
             logger.info(f"已将 {aggregation_count} 条连续买家消息聚合为 1 次 Agent 决策: chat_id={chat_id}")
@@ -522,15 +545,6 @@ class XianyuLive:
         # 检查是否需要回复
         if bot_reply == "-":
             logger.info(f"[无需回复] 用户 {send_user_name} 的消息被识别为无需回复类型")
-            self.context_manager.append_turn(
-                chat_id,
-                send_user_id,
-                item_id,
-                send_message,
-                self.myid,
-                assistant_text=None,
-                intent=bot_intent
-            )
             no_reply_record = self.reply_outbox.enqueue(
                 chat_id=chat_id,
                 item_id=item_id,
@@ -538,22 +552,12 @@ class XianyuLive:
                 source_message_id=source_message_id,
                 reply_text="-",
                 trace=bot_trace,
+                user_text=send_message,
+                intent=bot_intent,
             )
-            self.reply_outbox.mark_skipped(no_reply_record.dedupe_key, "no_reply")
+            no_reply_record = self.reply_outbox.mark_skipped(no_reply_record.dedupe_key, "no_reply")
+            self._commit_outbox_memory(no_reply_record)
             return
-
-        self.context_manager.append_turn(
-            chat_id,
-            send_user_id,
-            item_id,
-            send_message,
-            self.myid,
-            assistant_text=bot_reply,
-            intent=bot_intent
-        )
-        if bot_intent == "price":
-            bargain_count = self.context_manager.get_bargain_count_by_chat(chat_id)
-            logger.info(f"用户 {send_user_name} 对商品 {item_id} 的议价次数: {bargain_count}")
 
         logger.info(f"机器人回复: {bot_reply}")
         outbox_record = self.reply_outbox.enqueue(
@@ -563,15 +567,90 @@ class XianyuLive:
             source_message_id=source_message_id,
             reply_text=bot_reply,
             trace=bot_trace,
+            user_text=send_message,
+            intent=bot_intent,
         )
         await self._deliver_outbox_record(websocket, outbox_record)
 
+    def _commit_outbox_memory(self, record):
+        if record.status not in {"sent", "skipped"} or not record.user_text:
+            return False
+
+        assistant_text = None
+        if record.status == "sent" or (record.status == "skipped" and record.last_error == "dry_run"):
+            assistant_text = record.reply_text if record.reply_text != "-" else None
+        elif record.status != "skipped" or record.last_error not in {"manual_takeover", "no_reply"}:
+            return False
+
+        intent = "manual_takeover" if record.last_error == "manual_takeover" else record.intent
+        trace = record.trace if isinstance(record.trace, dict) else {}
+        price_decision = trace.get("price_decision", {}) if intent == "price" and assistant_text else {}
+        changed = self.context_manager.append_turn_once(
+            record.source_message_id,
+            record.chat_id,
+            record.user_id,
+            record.item_id,
+            record.user_text,
+            self.myid,
+            assistant_text=assistant_text,
+            intent=intent,
+            lowest_price_committed=price_decision.get("calculated_price"),
+            buyer_highest_offer=price_decision.get("buyer_offer"),
+        )
+        if changed and intent == "price" and assistant_text:
+            bargain_count = self.context_manager.get_bargain_count_by_chat(record.chat_id)
+            logger.info(f"会话 {record.chat_id} 的议价记忆已提交，议价次数: {bargain_count}")
+        return changed
+
+    def _suppress_for_manual_takeover(
+        self,
+        chat_id,
+        send_user_id,
+        item_id,
+        send_message,
+        source_message_id,
+        dedupe_key,
+    ):
+        existing_record = self.reply_outbox.get(dedupe_key)
+        if existing_record:
+            if existing_record.status not in {"sent", "skipped"}:
+                existing_record = self.reply_outbox.mark_skipped(dedupe_key, "manual_takeover")
+            self._commit_outbox_memory(existing_record)
+            logger.info(
+                f"会话 {chat_id} 已人工接管，终止自动回复: "
+                f"item_id={item_id}, outbox_status={existing_record.status}"
+            )
+            return
+
+        record = self.reply_outbox.enqueue(
+            chat_id=chat_id,
+            item_id=item_id,
+            user_id=send_user_id,
+            source_message_id=source_message_id,
+            reply_text="-",
+            trace={"execution": {"status": "manual_takeover"}},
+            user_text=send_message,
+            intent="manual_takeover",
+        )
+        if record.status not in {"sent", "skipped"}:
+            record = self.reply_outbox.mark_skipped(record.dedupe_key, "manual_takeover")
+        self._commit_outbox_memory(record)
+        logger.info(f"会话 {chat_id} 处于人工接管模式，已记录消息并禁止自动回复")
+
     async def _deliver_outbox_record(self, websocket, outbox_record):
+        if self.is_manual_mode(outbox_record.chat_id):
+            if outbox_record.status not in {"sent", "skipped"}:
+                outbox_record = self.reply_outbox.mark_skipped(outbox_record.dedupe_key, "manual_takeover")
+            self._commit_outbox_memory(outbox_record)
+            logger.info(f"会话 {outbox_record.chat_id} 已人工接管，Outbox 不再领取发送")
+            return
+
         claim = self.reply_outbox.claim_for_send(
             outbox_record.dedupe_key,
             stale_after_seconds=self.reply_send_claim_timeout_seconds,
         )
         if not claim.claimed:
+            self._commit_outbox_memory(claim.record)
             logger.info(
                 f"回复发送跳过: chat_id={claim.record.chat_id}, item_id={claim.record.item_id}, "
                 f"reason={claim.reason}, outbox_status={claim.record.status}"
@@ -588,8 +667,16 @@ class XianyuLive:
             logger.info(f"模拟人工输入，延迟发送 {total_delay:.2f} 秒...")
             await asyncio.sleep(total_delay)
 
+        # Re-check immediately before the only network side effect.
+        if self.is_manual_mode(claim.record.chat_id):
+            skipped_record = self.reply_outbox.mark_skipped(claim.record.dedupe_key, "manual_takeover")
+            self._commit_outbox_memory(skipped_record)
+            logger.info(f"会话 {claim.record.chat_id} 在发送前被人工接管，已取消回复")
+            return
+
         if self.reply_send_dry_run:
-            self.reply_outbox.mark_skipped(claim.record.dedupe_key, "dry_run")
+            skipped_record = self.reply_outbox.mark_skipped(claim.record.dedupe_key, "dry_run")
+            self._commit_outbox_memory(skipped_record)
             logger.info(
                 f"REPLY_SEND_DRY_RUN=true，仅记录不真实发送: "
                 f"chat_id={claim.record.chat_id}, item_id={claim.record.item_id}"
@@ -599,12 +686,14 @@ class XianyuLive:
         try:
             await self.send_msg(websocket, claim.record.chat_id, claim.record.user_id, reply_text)
             sent_record = self.reply_outbox.mark_sent(claim.record.dedupe_key)
+            self._commit_outbox_memory(sent_record)
             logger.info(
                 f"回复发送成功: chat_id={claim.record.chat_id}, item_id={claim.record.item_id}, "
                 f"outbox_id={sent_record.id}, attempts={sent_record.attempt_count}"
             )
         except Exception as exc:
             failed_record = self.reply_outbox.mark_failed(claim.record.dedupe_key, str(exc))
+            self._commit_outbox_memory(failed_record)
             logger.error(
                 f"回复发送失败: chat_id={claim.record.chat_id}, item_id={claim.record.item_id}, "
                 f"outbox_id={failed_record.id}, error={exc}"
@@ -800,7 +889,7 @@ class XianyuLive:
 
                 # 检查切换命令
                 if self.check_toggle_keywords(send_message):
-                    mode = self.toggle_manual_mode(chat_id)
+                    mode = self.toggle_manual_mode(chat_id, item_id=item_id)
                     if mode == "manual":
                         logger.info(f"🔴 已接管会话 {chat_id} (商品: {item_id})")
                     else:
@@ -818,8 +907,21 @@ class XianyuLive:
             # 如果当前会话处于人工接管模式，不进行自动回复
             if self.is_manual_mode(chat_id):
                 logger.info(f"🔴 会话 {chat_id} 处于人工接管模式，跳过自动回复")
-                # 添加用户消息到上下文
-                self.context_manager.add_message_by_chat(chat_id, send_user_id, item_id, "user", send_message)
+                await self._process_buyer_message(
+                    websocket,
+                    chat_id,
+                    send_user_id,
+                    item_id,
+                    send_message,
+                    send_user_name=send_user_name,
+                    source_message_id=ReplyOutbox.build_source_message_id(
+                        chat_id,
+                        item_id,
+                        send_user_id,
+                        send_message,
+                        event_time_ms=create_time,
+                    ),
+                )
                 return
             # 检查是否为带中括号的系统消息
             if self.is_bracket_system_message(send_message):
@@ -1413,6 +1515,9 @@ async def run_replay_mode():
             xianyu_api=ReplayXianyuApi(),
             reply_outbox=outbox,
             reply_send_dry_run=True,
+            manual_takeover_store=ManualTakeoverStore(
+                os.path.join(temp_dir, "manual_takeovers.db")
+            ),
         )
         websocket = ReplayWebSocket()
         chat_id = "replay_chat_001"

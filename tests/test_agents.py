@@ -220,15 +220,86 @@ def test_append_turn_atomically_updates_memory_snapshot(tmp_path):
         "seller",
         assistant_text="最低 4149 元",
         intent="price",
+        lowest_price_committed=4149,
+        buyer_highest_offer=3000,
     )
 
     snapshot = manager.get_memory_snapshot("chat_atomic")
 
     assert snapshot.bargain_count == 1
+    assert snapshot.lowest_price_committed == 4149
+    assert snapshot.buyer_highest_offer == 3000
     assert snapshot.messages == [
         {"role": "user", "content": "3000 元能出吗"},
         {"role": "assistant", "content": "最低 4149 元"},
     ]
+
+
+def test_append_turn_once_upgrades_user_only_commit_without_duplication(tmp_path):
+    manager = ChatContextManager(db_path=str(tmp_path / "chat_history.db"))
+    common = (
+        "source_1",
+        "chat_atomic",
+        "buyer",
+        "item_1",
+        "3000 元能出吗",
+        "seller",
+    )
+
+    assert manager.append_turn_once(*common, intent="manual_takeover") is True
+    assert manager.append_turn_once(
+        *common,
+        assistant_text="最低 4149 元",
+        intent="price",
+        lowest_price_committed=4149,
+        buyer_highest_offer=3000,
+    ) is True
+    assert manager.append_turn_once(
+        *common,
+        assistant_text="最低 4149 元",
+        intent="price",
+        lowest_price_committed=4149,
+        buyer_highest_offer=3000,
+    ) is False
+
+    snapshot = manager.get_memory_snapshot("chat_atomic")
+    assert snapshot.messages == [
+        {"role": "user", "content": "3000 元能出吗"},
+        {"role": "assistant", "content": "最低 4149 元"},
+    ]
+    assert snapshot.bargain_count == 1
+    assert snapshot.lowest_price_committed == 4149
+    assert snapshot.buyer_highest_offer == 3000
+
+
+def test_append_turn_once_restores_trimmed_user_before_full_upgrade(tmp_path):
+    manager = ChatContextManager(max_history=2, db_path=str(tmp_path / "chat_history.db"))
+    common = (
+        "source_trimmed",
+        "chat_atomic",
+        "buyer",
+        "item_1",
+        "3000 元能出吗",
+        "seller",
+    )
+    manager.append_turn_once(*common, intent="manual_takeover")
+    manager.append_turn("chat_atomic", "buyer", "item_1", "后续消息 1", "seller")
+    manager.append_turn("chat_atomic", "buyer", "item_1", "后续消息 2", "seller")
+
+    manager.append_turn_once(
+        *common,
+        assistant_text="最低 4149 元",
+        intent="price",
+        lowest_price_committed=4149,
+        buyer_highest_offer=3000,
+    )
+
+    snapshot = manager.get_memory_snapshot("chat_atomic")
+    assert snapshot.messages == [
+        {"role": "user", "content": "3000 元能出吗"},
+        {"role": "assistant", "content": "最低 4149 元"},
+    ]
+    assert snapshot.bargain_count == 1
 
 
 def test_append_turn_trims_history_by_chat(tmp_path):

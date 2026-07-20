@@ -137,3 +137,57 @@ def test_reply_outbox_reclaims_stale_sending_lease(tmp_path):
     assert recovered.claimed is True
     assert recovered.reason == "reclaimed_stale_sending"
     assert recovered.record.attempt_count == 2
+
+
+def test_reply_outbox_round_trips_memory_commit_payload(tmp_path):
+    outbox = ReplyOutbox(db_path=str(tmp_path / "reply_outbox.db"))
+    record = outbox.enqueue(
+        "chat_1",
+        "item_1",
+        "buyer_1",
+        "source_1",
+        "最低 99 元",
+        trace={"price_decision": {"calculated_price": 99}},
+        user_text="99 元可以吗",
+        intent="price",
+    )
+
+    reopened = ReplyOutbox(db_path=outbox.db_path).get(record.dedupe_key)
+
+    assert reopened.user_text == "99 元可以吗"
+    assert reopened.intent == "price"
+    assert reopened.trace == {"price_decision": {"calculated_price": 99}}
+
+
+def test_reply_outbox_migrates_legacy_schema(tmp_path):
+    db_path = str(tmp_path / "legacy_reply_outbox.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE reply_outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dedupe_key TEXT NOT NULL UNIQUE,
+            chat_id TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            source_message_id TEXT NOT NULL,
+            reply_text TEXT NOT NULL,
+            trace_json TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            sent_at DATETIME
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    outbox = ReplyOutbox(db_path=db_path)
+    conn = sqlite3.connect(db_path)
+    columns = conn.execute("PRAGMA table_info(reply_outbox)").fetchall()
+    conn.close()
+
+    assert {column[1] for column in columns} >= {"user_text", "intent"}

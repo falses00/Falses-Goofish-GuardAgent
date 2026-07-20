@@ -13,6 +13,7 @@
 7. 表达边界：真人化回复风格层，避免机器腔和客服腔。
 8. 执行边界：回复 Outbox，防重复发送、可重试、可审计。
 9. 产品边界：FastAPI service contract、人审、自动发货前确认。
+10. 控制边界：持久化人工接管、TTL、Outbox 发送前复核与操作审计。
 
 ## Lesson 1: 输入边界不是小事
 
@@ -97,6 +98,34 @@ curl -X POST http://127.0.0.1:8000/api/reply ^
 ## 面试讲法
 
 我没有把平台消息直接喂给 LLM，而是在 Agent loop 前面设计了一层输入稳定化模块。它按会话、商品、买家隔离短窗口消息，将连续短消息合并为一个业务 turn，再进入意图路由、专家 Agent、guardrails 和 memory 写入。这样既减少模型调用，也避免半截上下文污染，同时这层逻辑是纯 Python 状态机，可以独立单测和通过 API 端到端验证。
+
+## Lesson 1.1: 人工接管必须是执行层事实
+
+只在 Worker 内存里维护一个 `manual_chats` 集合，会产生三个真实故障：重启后接管丢失、Web 控制台和 Worker 看见不同状态、已经进入 Outbox 的旧回复仍可能被恢复发送。最佳实践是把 human-in-the-loop 做成独立状态机，而不是 Prompt 里的“请听人工指令”。
+
+本项目的实现路径：
+
+```mermaid
+flowchart LR
+    A["Operator Console"] --> B["ManualTakeoverStore"]
+    C["Seller Command"] --> B
+    B --> D["Pre-Agent Check"]
+    B --> E["Post-Model Check"]
+    B --> F["Pre-Outbox Claim"]
+    B --> G["Pre-Network Send"]
+    D --> H["Outbox skipped/manual_takeover"]
+    E --> I["Outbox skipped/manual_takeover"]
+    F --> I
+    G --> I
+```
+
+- `core/manual_takeover.py`：SQLite WAL 状态、60-86400 秒 TTL、开始/延长/恢复/到期审计。
+- `main.py`：决策和发送路径多点复核；live 生成阶段关闭价格记忆副作用，由 Outbox 终态决定提交用户消息还是完整 turn。
+- `context_manager.py`：按 `source_message_id` 幂等提交，并允许用户态升级为完整已发送态；完整 turn、议价次数和单调价格承诺在一个 SQLite 事务中更新。
+- `api/app.py`：受 Bearer Token 保护的查询、接管、恢复和审计接口。
+- `tests/test_manual_takeover.py`、`tests/test_live_reply_execution.py`：验证跨实例可见、重启持久化、TTL 到期、模型中途接管和待发送回复取消。
+
+这里仍不宣称绝对撤回：接管库、会话库和 Outbox 是独立事务，最后一次 SQLite 检查和远端 WebSocket 发送之间也存在极窄窗口，平台没有提供同一事务内的撤回能力。面试时主动说明这个边界，比声称“完全自动且绝不误发”更符合生产 Agent 的设计实践。
 
 ## Lesson 2: 规则中心先于自动执行
 
@@ -207,13 +236,14 @@ flowchart LR
 - `failed`：发送失败，允许后续重试。
 - `skipped`：无需回复或 dry-run。
 
-live 模式里，同一个买家源消息会先计算 `source_message_id` 和 `dedupe_key`。第一次处理才会调用 Agent 并写入完整 turn；如果 Outbox 已经存在，则根据状态恢复执行：`sent / skipped` 直接结束，`pending / failed` 复用已落库回复，`sending` 只有租约超时后才允许重新领取。
+live 模式里，同一个买家源消息会先计算 `source_message_id` 和 `dedupe_key`。第一次处理调用 Agent 后，将回复、买家原文、意图和 Trace 一起写入 Outbox，但不提前写助手记忆；`sent / dry_run` 终态幂等提交完整 turn，`manual_takeover / no_reply` 只提交用户消息。`pending / failed` 复用已落库回复，`sending` 只有租约超时后才允许重新领取。
 
 这里有三个重要设计原则：
 
 - **决策与副作用分离**：LLM 生成回复是决策，WebSocket 发送是副作用。发送失败只重试副作用，不重新生成回复。
 - **原子领取**：`BEGIN IMMEDIATE` 把读取状态和 claim 放入同一个 SQLite 写事务，并发 worker 只能有一个把状态改为 `sending`。
 - **有界租约**：进程在 `sending` 状态崩溃时，记录不会永久卡死；超过 `REPLY_SEND_CLAIM_TIMEOUT_SECONDS` 后可以恢复领取。
+- **终态驱动记忆**：发送失败不产生助手记忆；终态重复恢复按源事件去重，接管与已发送交错时只做一次用户态到完整态升级。
 
 还要明确交付语义：本项目保证原子 claim 和终态事件去重，但远端 WebSocket 没有可用的业务幂等键。若远端已收到消息、本地却在 `mark_sent` 前崩溃，重试可能再次发送。因此这里是带去重保护的 at-least-once 执行，而不是凭空宣称 exactly-once。面试中主动说明这个 ACK 窗口，反而更能体现你理解分布式副作用的真实边界。
 
@@ -231,7 +261,7 @@ python main.py --mode replay
 
 - 机器腔回复会被改写，trace 中出现 `human_reply_style` 和 `human_style_rewrite`。
 - 同一个源消息只能 claim 一次发送权。
-- 发送失败后复用原回复再次 claim，不增加会话记忆。
+- 发送失败后记忆仍为空；复用原回复发送成功后只提交一轮会话记忆。
 - 8 个并发 worker 抢占同一记录时，只有 1 个成功。
 - 过期的 `sending` lease 可以恢复，dry-run 回放不会产生网络发送。
 

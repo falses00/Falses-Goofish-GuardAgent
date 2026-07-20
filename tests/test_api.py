@@ -18,6 +18,7 @@ def build_client(tmp_path):
         db_path=str(tmp_path / "api_chat_history.db"),
         trace_path=str(tmp_path / "agent_traces.jsonl"),
         request_replay_path=str(tmp_path / "api_request_replay.db"),
+        manual_takeover_path=str(tmp_path / "manual_takeovers.db"),
     )
     return TestClient(app)
 
@@ -42,6 +43,57 @@ def test_capabilities_exposes_registered_intents(tmp_path):
         "offline_mode": True,
         "extension_contract": "register_agent",
     }
+
+
+def test_takeover_api_persists_lists_audits_and_releases(tmp_path):
+    client = build_client(tmp_path)
+
+    enabled = client.put(
+        "/api/takeovers/chat_ops_1",
+        json={"item_id": "item_9", "ttl_seconds": 900, "note": "buyer requested a human"},
+    )
+    listed = client.get("/api/takeovers")
+    fetched = client.get("/api/takeovers/chat_ops_1")
+    released = client.delete("/api/takeovers/chat_ops_1")
+    events = client.get("/api/takeovers/events", params={"chat_id": "chat_ops_1"})
+    overview = client.get("/api/overview")
+
+    assert enabled.status_code == 200
+    assert enabled.json()["active"] is True
+    assert enabled.json()["item_id"] == "item_9"
+    assert listed.json()["count"] == 1
+    assert fetched.json()["note"] == "buyer requested a human"
+    assert released.json()["active"] is False
+    assert [event["action"] for event in events.json()["items"]] == ["disabled", "enabled"]
+    assert overview.json()["takeovers"] == {"active_count": 0}
+
+
+def test_takeover_api_is_protected_and_validates_ttl(tmp_path):
+    app = create_app(
+        offline_mode=True,
+        db_path=str(tmp_path / "api_chat_history.db"),
+        trace_path=str(tmp_path / "agent_traces.jsonl"),
+        request_replay_path=str(tmp_path / "api_request_replay.db"),
+        manual_takeover_path=str(tmp_path / "manual_takeovers.db"),
+        access_token="operator-secret",
+    )
+    client = TestClient(app)
+
+    unauthorized = client.get("/api/takeovers")
+    invalid = client.put(
+        "/api/takeovers/chat_1",
+        headers={"Authorization": "Bearer operator-secret"},
+        json={"ttl_seconds": 30},
+    )
+    blank_chat_id = client.put(
+        "/api/takeovers/%20%20",
+        headers={"Authorization": "Bearer operator-secret"},
+        json={"ttl_seconds": 600},
+    )
+
+    assert unauthorized.status_code == 401
+    assert invalid.status_code == 422
+    assert blank_chat_id.status_code == 422
 
 
 def test_reply_routes_tech_question_and_persists_memory(tmp_path):
@@ -140,6 +192,7 @@ def test_api_falls_back_to_offline_when_key_is_placeholder(tmp_path, monkeypatch
         db_path=str(tmp_path / "api_chat_history.db"),
         trace_path=str(tmp_path / "agent_traces.jsonl"),
         request_replay_path=str(tmp_path / "api_request_replay.db"),
+        manual_takeover_path=str(tmp_path / "manual_takeovers.db"),
     )
     client = TestClient(app)
 
@@ -193,6 +246,7 @@ def test_shared_agent_decisions_are_serialized_and_traces_do_not_cross(tmp_path)
         db_path=str(tmp_path / "api_chat_history.db"),
         trace_path=str(tmp_path / "agent_traces.jsonl"),
         request_replay_path=str(tmp_path / "api_request_replay.db"),
+        manual_takeover_path=str(tmp_path / "manual_takeovers.db"),
     )
     client = TestClient(app)
     original_generate_reply = app.state.bot.generate_reply
@@ -244,12 +298,14 @@ def test_slow_request_renews_replay_lease_across_app_instances(tmp_path, monkeyp
         db_path=db_path,
         trace_path=trace_path,
         request_replay_path=replay_path,
+        manual_takeover_path=str(tmp_path / "manual_takeovers.db"),
     )
     app_two = create_app(
         offline_mode=True,
         db_path=db_path,
         trace_path=trace_path,
         request_replay_path=replay_path,
+        manual_takeover_path=str(tmp_path / "manual_takeovers.db"),
     )
     client_one = TestClient(app_one)
     client_two = TestClient(app_two)
@@ -316,6 +372,7 @@ def test_operator_console_and_static_assets_are_served_with_security_headers(tmp
     assert "Falses Goofish GuardAgent" in page.text
     assert 'data-view="dashboard"' in page.text
     assert 'data-view="workbench"' in page.text
+    assert 'data-view="takeovers"' in page.text
     assert 'data-view="traces"' in page.text
     assert 'data-view="runtime"' in page.text
     assert 'id="globalSearch"' in page.text
@@ -324,8 +381,11 @@ def test_operator_console_and_static_assets_are_served_with_security_headers(tmp
     assert 'id="runtimeAlert"' in page.text
     assert 'id="traceSearch"' in page.text
     assert 'id="traceStatusFilter"' in page.text
-    assert "/static/styles.css?v=20260718.3" in page.text
-    assert "/static/app.js?v=20260718.3" in page.text
+    assert 'id="takeoverForm"' in page.text
+    assert 'id="takeoverList"' in page.text
+    assert 'id="takeoverEvents"' in page.text
+    assert "/static/styles.css?v=20260720.1" in page.text
+    assert "/static/app.js?v=20260720.1" in page.text
     assert stylesheet.status_code == 200
     assert page.headers["x-content-type-options"] == "nosniff"
     assert "default-src 'self'" in page.headers["content-security-policy"]
@@ -338,6 +398,7 @@ def test_optional_bearer_token_protects_sensitive_api_routes(tmp_path):
         db_path=str(tmp_path / "api_chat_history.db"),
         trace_path=str(tmp_path / "agent_traces.jsonl"),
         request_replay_path=str(tmp_path / "api_request_replay.db"),
+        manual_takeover_path=str(tmp_path / "manual_takeovers.db"),
         access_token="local-test-token",
     )
     client = TestClient(app)
@@ -364,6 +425,7 @@ def test_readiness_and_overview_report_real_worker_snapshot(tmp_path):
         db_path=str(tmp_path / "api_chat_history.db"),
         trace_path=str(tmp_path / "agent_traces.jsonl"),
         request_replay_path=str(tmp_path / "api_request_replay.db"),
+        manual_takeover_path=str(tmp_path / "manual_takeovers.db"),
         runtime_status_path=str(runtime_path),
     )
     client = TestClient(app)

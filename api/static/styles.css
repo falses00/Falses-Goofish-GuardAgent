@@ -1438,6 +1438,7 @@ html[data-theme="dark"] .theme-icon-moon {
 
 .quick-action-icon.green { background: var(--success-soft); color: var(--success); }
 .quick-action-icon.orange { background: var(--warning-soft); color: var(--warning); }
+.quick-action-icon.red { background: var(--danger-soft); color: var(--danger); }
 
 .quick-action-icon svg {
   width: 17px;
@@ -2287,6 +2288,183 @@ input::placeholder {
   font-size: 0.66rem;
 }
 
+.takeover-grid {
+  display: grid;
+  grid-template-columns: minmax(300px, 0.72fr) minmax(460px, 1.28fr);
+  align-items: start;
+  gap: 16px;
+}
+
+.takeover-form-panel {
+  position: sticky;
+  top: calc(var(--topbar-height) + 18px);
+}
+
+.takeover-form {
+  padding: 0 18px 18px;
+}
+
+.takeover-form .field-group small {
+  color: var(--muted);
+  font-size: 0.61rem;
+  line-height: 1.55;
+}
+
+.takeover-form .button[type="submit"] {
+  width: 100%;
+  margin-top: 16px;
+}
+
+.takeover-safety-note {
+  display: grid;
+  gap: 3px;
+  margin-top: 16px;
+  padding: 11px 12px;
+  border: 1px solid var(--warning-border);
+  border-radius: var(--radius-md);
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.takeover-safety-note strong {
+  font-size: 0.68rem;
+}
+
+.takeover-safety-note span {
+  font-size: 0.61rem;
+  line-height: 1.55;
+}
+
+.takeover-list {
+  display: grid;
+  min-height: 160px;
+}
+
+.takeover-list[aria-busy="true"]:empty {
+  background: linear-gradient(var(--surface-subtle), var(--surface-subtle)) 18px 20px / calc(100% - 36px) 72px no-repeat;
+}
+
+.takeover-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 16px 18px;
+  border-top: 1px solid var(--border);
+}
+
+.takeover-row:first-child {
+  border-top: 0;
+}
+
+.takeover-row-main {
+  min-width: 0;
+}
+
+.takeover-row-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.takeover-row-heading strong {
+  overflow-wrap: anywhere;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.77rem;
+}
+
+.takeover-row-main > p {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 0.64rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.takeover-row-main .takeover-row-note {
+  color: var(--text-soft);
+}
+
+.takeover-row > .button {
+  flex: 0 0 auto;
+}
+
+.takeover-error {
+  margin: 16px 18px 18px;
+}
+
+.takeover-events-panel {
+  grid-column: 1 / -1;
+}
+
+.takeover-events {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 0 18px 18px;
+}
+
+.takeover-event-row {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+  padding: 13px 0;
+  border-top: 1px solid var(--border);
+}
+
+.takeover-event-row:nth-child(odd) {
+  padding-right: 18px;
+}
+
+.takeover-event-row:nth-child(even) {
+  padding-left: 18px;
+  border-left: 1px solid var(--border);
+}
+
+.takeover-event-marker {
+  width: 9px;
+  height: 9px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--primary);
+}
+
+.takeover-event-marker[data-action="disabled"],
+.takeover-event-marker[data-action="expired"] {
+  background: var(--success);
+}
+
+.takeover-event-row strong {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 0.68rem;
+}
+
+.takeover-event-row p,
+.takeover-event-row time,
+.takeover-events-empty {
+  color: var(--muted);
+  font-size: 0.61rem;
+}
+
+.takeover-event-row p {
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+
+.takeover-event-row time {
+  white-space: nowrap;
+}
+
+.takeover-events-empty {
+  grid-column: 1 / -1;
+  padding: 16px 0;
+}
+
 .runtime-overview-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
@@ -2562,8 +2740,13 @@ input::placeholder {
   }
 
   .workbench-grid,
+  .takeover-grid,
   .runtime-overview-grid {
     grid-template-columns: 1fr;
+  }
+
+  .takeover-form-panel {
+    position: static;
   }
 
   .trace-toolbar {
@@ -2798,6 +2981,32 @@ input::placeholder {
   .runtime-data-list {
     grid-template-columns: 1fr;
     padding: 6px 14px 14px;
+  }
+
+  .takeover-row {
+    align-items: stretch;
+    flex-direction: column;
+    padding: 15px 14px;
+  }
+
+  .takeover-row > .button {
+    width: 100%;
+  }
+
+  .takeover-form {
+    padding: 0 14px 14px;
+  }
+
+  .takeover-events {
+    grid-template-columns: 1fr;
+    padding: 0 14px 14px;
+  }
+
+  .takeover-event-row:nth-child(odd),
+  .takeover-event-row:nth-child(even) {
+    padding-right: 0;
+    padding-left: 0;
+    border-left: 0;
   }
 
   .runtime-data-list .data-pair:nth-child(odd),

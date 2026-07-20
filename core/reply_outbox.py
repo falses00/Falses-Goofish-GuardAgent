@@ -2,7 +2,7 @@ import hashlib
 import json
 import os
 import sqlite3
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
@@ -21,6 +21,9 @@ class ReplyOutboxRecord:
     reply_text: str
     status: str
     attempt_count: int
+    user_text: str = ""
+    intent: Optional[str] = None
+    trace: Dict[str, Any] = field(default_factory=dict)
     last_error: Optional[str] = None
     updated_at: Optional[str] = None
     created: bool = False
@@ -86,6 +89,12 @@ class ReplyOutbox:
         )
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_reply_outbox_status ON reply_outbox (status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_reply_outbox_chat ON reply_outbox (chat_id)")
+        cursor.execute("PRAGMA table_info(reply_outbox)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "user_text" not in columns:
+            cursor.execute("ALTER TABLE reply_outbox ADD COLUMN user_text TEXT NOT NULL DEFAULT ''")
+        if "intent" not in columns:
+            cursor.execute("ALTER TABLE reply_outbox ADD COLUMN intent TEXT")
         conn.commit()
         conn.close()
 
@@ -115,6 +124,8 @@ class ReplyOutbox:
         source_message_id: str,
         reply_text: str,
         trace: Optional[Dict[str, Any]] = None,
+        user_text: str = "",
+        intent: Optional[str] = None,
     ) -> ReplyOutboxRecord:
         dedupe_key = self.build_dedupe_key(chat_id, item_id, user_id, source_message_id)
         trace_json = json.dumps(trace or {}, ensure_ascii=False)
@@ -127,11 +138,23 @@ class ReplyOutbox:
                 """
                 INSERT OR IGNORE INTO reply_outbox (
                     dedupe_key, chat_id, item_id, user_id, source_message_id,
-                    reply_text, trace_json, status, created_at, updated_at
+                    reply_text, trace_json, user_text, intent, status, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
                 """,
-                (dedupe_key, chat_id, item_id, user_id, source_message_id, reply_text, trace_json, now, now),
+                (
+                    dedupe_key,
+                    chat_id,
+                    item_id,
+                    user_id,
+                    source_message_id,
+                    reply_text,
+                    trace_json,
+                    user_text,
+                    intent,
+                    now,
+                    now,
+                ),
             )
             created = cursor.rowcount == 1
             conn.commit()
@@ -142,10 +165,12 @@ class ReplyOutbox:
                     UPDATE reply_outbox
                     SET reply_text = ?,
                         trace_json = ?,
+                        user_text = ?,
+                        intent = ?,
                         updated_at = ?
                     WHERE dedupe_key = ?
                     """,
-                    (reply_text, trace_json, datetime.now().isoformat(), dedupe_key),
+                    (reply_text, trace_json, user_text, intent, datetime.now().isoformat(), dedupe_key),
                 )
                 conn.commit()
                 record = self._fetch_by_key(cursor, dedupe_key)
@@ -201,28 +226,49 @@ class ReplyOutbox:
             conn.close()
 
     def mark_sent(self, dedupe_key: str) -> ReplyOutboxRecord:
-        return self._mark(dedupe_key, "sent", sent=True)
+        return self._mark(dedupe_key, "sent", sent=True, allowed_statuses={"sending", "skipped"})
 
     def mark_skipped(self, dedupe_key: str, reason: str) -> ReplyOutboxRecord:
-        return self._mark(dedupe_key, "skipped", error=reason)
+        return self._mark(dedupe_key, "skipped", error=reason, allowed_statuses={"pending", "failed", "sending"})
 
     def mark_failed(self, dedupe_key: str, error: str) -> ReplyOutboxRecord:
-        return self._mark(dedupe_key, "failed", error=error)
+        return self._mark(dedupe_key, "failed", error=error, allowed_statuses={"sending", "failed"})
 
-    def _mark(self, dedupe_key: str, status: str, error: Optional[str] = None, sent: bool = False) -> ReplyOutboxRecord:
+    def _mark(
+        self,
+        dedupe_key: str,
+        status: str,
+        error: Optional[str] = None,
+        sent: bool = False,
+        allowed_statuses: Optional[set] = None,
+    ) -> ReplyOutboxRecord:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         try:
+            status_filter = ""
+            params = [
+                status,
+                error,
+                datetime.now().isoformat(),
+                1 if sent else 0,
+                datetime.now().isoformat(),
+                dedupe_key,
+            ]
+            if allowed_statuses:
+                placeholders = ", ".join("?" for _ in allowed_statuses)
+                status_filter = f" AND status IN ({placeholders})"
+                params.extend(sorted(allowed_statuses))
             cursor.execute(
-                """
+                f"""
                 UPDATE reply_outbox
                 SET status = ?,
                     last_error = ?,
                     updated_at = ?,
                     sent_at = CASE WHEN ? THEN ? ELSE sent_at END
                 WHERE dedupe_key = ?
+                {status_filter}
                 """,
-                (status, error, datetime.now().isoformat(), 1 if sent else 0, datetime.now().isoformat(), dedupe_key),
+                params,
             )
             conn.commit()
             return self._fetch_by_key(cursor, dedupe_key)
@@ -251,7 +297,8 @@ class ReplyOutbox:
         cursor.execute(
             """
             SELECT id, dedupe_key, chat_id, item_id, user_id, source_message_id,
-                   reply_text, status, attempt_count, last_error, updated_at
+                   reply_text, user_text, intent, trace_json, status, attempt_count,
+                   last_error, updated_at
             FROM reply_outbox
             WHERE dedupe_key = ?
             """,
@@ -262,4 +309,24 @@ class ReplyOutbox:
             if required:
                 raise KeyError(f"reply outbox record not found: {dedupe_key}")
             return None
-        return ReplyOutboxRecord(*row)
+        trace = {}
+        try:
+            trace = json.loads(row[9] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            pass
+        return ReplyOutboxRecord(
+            id=row[0],
+            dedupe_key=row[1],
+            chat_id=row[2],
+            item_id=row[3],
+            user_id=row[4],
+            source_message_id=row[5],
+            reply_text=row[6],
+            user_text=row[7] or "",
+            intent=row[8],
+            trace=trace,
+            status=row[10],
+            attempt_count=row[11],
+            last_error=row[12],
+            updated_at=row[13],
+        )

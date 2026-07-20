@@ -7,8 +7,8 @@
     <meta name="description" content="Falses Goofish GuardAgent 本地运营控制台">
     <title>GuardAgent Console</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/static/styles.css?v=20260718.3">
-    <script src="/static/app.js?v=20260718.3" defer></script>
+    <link rel="stylesheet" href="/static/styles.css?v=20260720.1">
+    <script src="/static/app.js?v=20260720.1" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -46,6 +46,11 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H7l-3 3V5Z"></path><path d="M8 9h8M8 12h5"></path></svg>
             <span>回复试跑</span>
             <small>Dry-run</small>
+          </button>
+          <button class="nav-item" type="button" data-view="takeovers">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 6v5c0 5 3.4 8.3 8 10 4.6-1.7 8-5 8-10V6l-8-3Z"></path><path d="M9 12h6M12 9v6"></path></svg>
+            <span>人工接管</span>
+            <small id="sidebarTakeoverCount">读取中</small>
           </button>
 
           <p class="nav-label">审计</p>
@@ -225,6 +230,7 @@
               <section class="panel quick-actions-panel" aria-labelledby="quickActionsTitle">
                 <div class="panel-heading compact-heading"><div><p class="section-kicker">Quick actions</p><h2 id="quickActionsTitle">快捷操作</h2></div></div>
                 <div class="quick-action-list">
+                  <button type="button" data-action-view="takeovers"><span class="quick-action-icon red"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 6v5c0 5 3.4 8.3 8 10 4.6-1.7 8-5 8-10V6l-8-3Z"></path><path d="M9 12h6M12 9v6"></path></svg></span><span><strong>接管买家会话</strong><small>暂停自动决策与待发送回复</small></span><span aria-hidden="true">→</span></button>
                   <button type="button" data-action-view="workbench"><span class="quick-action-icon blue"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H7l-3 3V5Z"></path></svg></span><span><strong>模拟买家消息</strong><small>验证回复、定价与事实</small></span><span aria-hidden="true">→</span></button>
                   <button type="button" data-action-view="traces"><span class="quick-action-icon green"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"></path></svg></span><span><strong>审查 Agent Trace</strong><small>筛选护栏与模型降级</small></span><span aria-hidden="true">→</span></button>
                   <button type="button" data-action-view="runtime"><span class="quick-action-icon orange"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2-5 4 10 2-5h6"></path></svg></span><span><strong>处理 Worker 异常</strong><small>查看心跳与恢复路径</small></span><span aria-hidden="true">→</span></button>
@@ -304,6 +310,41 @@
                   </div>
                   <details class="raw-details"><summary>原始 API 响应</summary><pre id="rawReplyOutput"></pre></details>
                 </div>
+              </section>
+            </div>
+          </section>
+
+          <section class="workspace-view" id="view-takeovers" data-workspace-view="takeovers" aria-labelledby="takeoverViewTitle" hidden>
+            <h2 class="sr-only" id="takeoverViewTitle">人工接管工作区</h2>
+            <div class="takeover-grid">
+              <section class="panel takeover-form-panel" aria-labelledby="takeoverFormTitle">
+                <div class="panel-heading">
+                  <div><p class="section-kicker">Human in the loop</p><h2 id="takeoverFormTitle">接管会话</h2><p>立即停止该会话的模型决策，并取消尚未发出的自动回复。</p></div>
+                </div>
+                <form id="takeoverForm" class="takeover-form" novalidate>
+                  <div class="field-group"><label for="takeoverChatId">会话 ID <span aria-hidden="true">*</span></label><input id="takeoverChatId" name="chat_id" maxlength="128" required autocomplete="off" placeholder="例如 123456789"><small>来自闲鱼消息会话；接管以会话 ID 为唯一边界。</small></div>
+                  <div class="field-group"><label for="takeoverItemId">商品 ID</label><input id="takeoverItemId" name="item_id" maxlength="128" autocomplete="off" placeholder="选填，用于运营审计"></div>
+                  <div class="field-group"><label for="takeoverTtl">接管时长</label><select id="takeoverTtl" name="ttl_seconds"><option value="900">15 分钟</option><option value="3600" selected>1 小时</option><option value="14400">4 小时</option><option value="86400">24 小时</option></select></div>
+                  <div class="field-group"><label for="takeoverNote">接管原因</label><textarea id="takeoverNote" name="note" rows="3" maxlength="500" placeholder="例如：售后争议，需要人工确认"></textarea></div>
+                  <div class="takeover-safety-note"><strong>接管状态跨进程、跨重启生效。</strong><span>到期后自动恢复；恢复自动回复前请先确认人工沟通已经结束。</span></div>
+                  <button class="button button-primary button-large" id="takeoverSubmitButton" type="submit">确认人工接管</button>
+                  <div class="form-feedback" id="takeoverFeedback" aria-live="assertive" hidden></div>
+                </form>
+              </section>
+
+              <section class="panel takeover-active-panel" aria-labelledby="activeTakeoverTitle">
+                <div class="panel-heading database-heading">
+                  <div><p class="section-kicker">Active queue</p><h2 id="activeTakeoverTitle">当前接管</h2><p>Worker 会持续读取同一份状态，倒计时结束后自动恢复。</p></div>
+                  <div class="trace-heading-actions"><span class="trace-count" id="takeoverCount">读取中</span><button class="button button-secondary button-compact" id="refreshTakeoversButton" type="button">刷新</button></div>
+                </div>
+                <div class="takeover-list" id="takeoverList" aria-live="polite" aria-busy="true"></div>
+                <div class="empty-state compact-empty" id="takeoverEmpty" hidden><span class="empty-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 6v5c0 5 3.4 8.3 8 10 4.6-1.7 8-5 8-10V6l-8-3Z"></path><path d="m9 12 2 2 4-4"></path></svg></span><strong>没有人工接管中的会话</strong><p>所有新买家消息将按当前 Worker 配置进入自动决策链。</p></div>
+                <div class="inline-error takeover-error" id="takeoverError" role="alert" hidden><strong id="takeoverErrorTitle">无法读取接管状态</strong><p id="takeoverErrorMessage"></p><button class="button button-secondary button-compact" id="takeoverErrorAction" type="button">重试</button></div>
+              </section>
+
+              <section class="panel takeover-events-panel" aria-labelledby="takeoverEventsTitle">
+                <div class="panel-heading compact-heading"><div><p class="section-kicker">Audit log</p><h2 id="takeoverEventsTitle">接管审计</h2></div></div>
+                <div class="takeover-events" id="takeoverEvents"></div>
               </section>
             </div>
           </section>

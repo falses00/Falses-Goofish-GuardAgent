@@ -8,7 +8,7 @@
 - 商品详情咨询时，LLM 不能编造配件、成色、拆修、发货信息。
 - 本地演示和迭代时，不必每次都依赖真实 Cookie 和真实买家消息。
 
-当前版本保留原项目的闲鱼 WebSocket 长连接能力，并新增本地 Mock CLI、HTTP Agent API、SQLite 价格承诺记忆、硬规则议价护栏、JSON 商品知识库、商品规则中心、真人化回复风格层、回复执行 Outbox、交付决策引擎、JSONL trace 回放和针对核心策略的自动化测试 / Agent 评测门禁。
+当前版本保留原项目的闲鱼 WebSocket 长连接能力，并新增本地 Mock CLI、HTTP Agent API、SQLite 价格承诺记忆、持久化人工接管、硬规则议价护栏、JSON 商品知识库、商品规则中心、真人化回复风格层、回复执行 Outbox、交付决策引擎、JSONL trace 回放和针对核心策略的自动化测试 / Agent 评测门禁。
 
 仓库地址：[https://github.com/falses00/Falses-Goofish-GuardAgent](https://github.com/falses00/Falses-Goofish-GuardAgent)
 
@@ -23,6 +23,7 @@
 - **SQLite 负责记忆**：多轮会话中记录历史报价和买家最高出价。
 - **Style 负责人味**：拦截“作为 AI 客服”“感谢咨询”等机器腔，让回复更像真实个人卖家。
 - **Outbox 负责执行**：真实发送前先登记并原子抢占发送权；失败重试复用原回复，避免重复调用模型和重复写记忆。
+- **人工接管负责止损**：API 控制台与 Worker 共享 SQLite 接管状态，重启后仍生效；新决策和待发送回复都会被终止。
 - **Trace 负责解释**：每轮回复记录路由、护栏、定价来源和知识命中。
 - **本地模式负责调试**：不接入闲鱼也能复现议价和咨询链路。
 - **服务接口负责集成**：通过 FastAPI 暴露 `/api/reply`，让 Agent 能接入 Web 管理台、移动端映射或后续 MCP 工具。
@@ -105,7 +106,7 @@ $env:API_OFFLINE_MODE="true"
 uvicorn api.app:app --host 127.0.0.1 --port 8000
 ```
 
-服务化入口会复用同一套 `XianyuReplyBot` 决策核心，并在根路径提供本地卖家运营台。浏览器打开 `http://127.0.0.1:8000/`，可在“运营总览 / 回复试跑 / 决策记录 / 运行状态”之间切换：总览聚合真实 Worker、Trace、护栏与实时活动；回复试跑安全模拟买家消息；决策记录按意图和状态筛选 Trace；运行状态提供心跳证据与恢复步骤。控制台的模拟回复不会调用闲鱼发送接口，默认也不会写入会话记忆。前端调研、Notion 范式与设计取舍见 [`docs/FRONTEND_RESEARCH_2026-07.md`](docs/FRONTEND_RESEARCH_2026-07.md)。
+服务化入口会复用同一套 `XianyuReplyBot` 决策核心，并在根路径提供本地卖家运营台。浏览器打开 `http://127.0.0.1:8000/`，可在“运营总览 / 回复试跑 / 人工接管 / 决策记录 / 运行状态”之间切换：总览聚合真实 Worker、Trace、护栏与实时活动；回复试跑安全模拟买家消息；人工接管按会话暂停自动决策并查看审计记录；决策记录按意图和状态筛选 Trace；运行状态提供心跳证据与恢复步骤。控制台的模拟回复不会调用闲鱼发送接口，默认也不会写入会话记忆。前端调研、Notion 范式与设计取舍见 [`docs/FRONTEND_RESEARCH_2026-07.md`](docs/FRONTEND_RESEARCH_2026-07.md)。
 
 核心接口：
 
@@ -116,9 +117,11 @@ uvicorn api.app:app --host 127.0.0.1 --port 8000
 - `GET /api/capabilities`：列出当前已注册的业务意图，便于管理台或 MCP 动态发现能力。
 - `POST /api/reply`：输入买家消息、商品信息和会话 ID，返回回复、意图、trace 和 memory snapshot；可带 `request_id` 获得完成态请求回放保护。
 - `GET /api/memory/{chat_id}`：查询指定会话的本地记忆与议价承诺。
+- `GET /api/takeovers`、`GET /api/takeovers/events`：查询当前人工接管与不可变操作审计。
+- `PUT /api/takeovers/{chat_id}`、`DELETE /api/takeovers/{chat_id}`：接管会话或恢复自动回复；接管最长 24 小时并自动过期。
 - `GET /api/traces?limit=20&chat_id=...&intent=...`：过滤最近的 JSONL trace，便于排查和回放。
 
-API 默认只建议绑定 `127.0.0.1`。设置 `API_ACCESS_TOKEN` 后，回复、记忆和 Trace 接口要求 `Authorization: Bearer <token>`；控制台令牌只保存在当前标签页的 `sessionStorage`。生产环境可设置 `API_DOCS_ENABLED=false` 关闭 Swagger/ReDoc。由于决策核心仍包含兼容旧调用方的可变 Trace 状态，API 部署固定使用单 worker，由进程内锁保证请求隔离；横向扩展前应先把决策结果重构为不可变返回值。
+API 默认只建议绑定 `127.0.0.1`。设置 `API_ACCESS_TOKEN` 后，回复、记忆、人工接管和 Trace 接口要求 `Authorization: Bearer <token>`；控制台令牌只保存在当前标签页的 `sessionStorage`。生产环境可设置 `API_DOCS_ENABLED=false` 关闭 Swagger/ReDoc。由于决策核心仍包含兼容旧调用方的可变 Trace 状态，API 部署固定使用单 worker，由进程内锁保证请求隔离；横向扩展前应先把决策结果重构为不可变返回值。
 
 示例：
 
@@ -171,14 +174,28 @@ curl -X POST http://127.0.0.1:8000/api/reply ^
 真实闲鱼 WebSocket 同步可能因为重连、ACK、重复推送导致同一条买家消息被处理多次。`core/reply_outbox.py` 在真实发送前落库并抢占发送权：
 
 - 同一个源消息事件同一时刻只允许一个 worker 持有发送权，已完成事件的重复投递会被抑制。
-- `pending` 或 `failed` 事件恢复时直接发送已落库回复，不会再次调用 Agent 或重复写记忆。
+- `pending` 或 `failed` 事件恢复时直接发送已落库回复，不会再次调用 Agent；发送失败前不写助手记忆，终态恢复时按源事件幂等提交。
 - SQLite 原子事务保证并发 worker 只有一个能取得发送权。
 - 超时的 `sending` 记录可按 lease 重新领取，避免进程崩溃后永久卡住。
 - 发送成功后标记 `sent`，重复事件直接跳过。
 - 发送失败后标记 `failed`，允许后续重试。
 - `REPLY_SEND_DRY_RUN=true` 时只记录不真实发送，适合接入真实 Cookie 前压测。
+- Outbox 同时保存买家原文、意图和决策 Trace；`sent / dry_run` 提交完整 turn，`manual_takeover / no_reply` 只提交买家消息。
+- `source_message_id` 驱动记忆幂等；极端情况下若远端发送与接管交错，用户态记忆可升级为完整已发送 turn，不会重复累计议价次数。
 
 这里采用的是“持久化 Outbox + at-least-once 重试 + 进程内并发幂等”。闲鱼 WebSocket 发送接口没有暴露业务幂等键，因此如果消息已经到达平台、进程却在 `mark_sent` 前崩溃，恢复重试仍存在极小的重复发送窗口。生产上需要平台 ACK/幂等键或人工审计来进一步收敛，项目不会把这一点包装成不存在的 exactly-once 保证。
+
+### 11.1 持久化人工接管
+
+`core/manual_takeover.py` 将人工接管从 Worker 内存集合升级为 SQLite 状态机。控制台和 Worker 只要共享 `MANUAL_TAKEOVER_DB_PATH`，即可跨进程读写同一事实源：
+
+- 控制台可按 `chat_id` 设置 15 分钟到 24 小时的接管时限、商品 ID 和原因。
+- Worker 在 Agent 决策前、模型返回后、Outbox 领取前和网络发送前重复检查接管状态。
+- 接管期间的新买家消息只写入用户上下文，不调用模型；待发送或失败待重试记录转为 `skipped/manual_takeover`。
+- live 价格 Agent 生成阶段不写状态；完整 turn、议价次数和单调价格承诺只在 Outbox 确认 `sent` 或 dry-run 终态后由同一 SQLite 事务提交。
+- 开始、延长、手动恢复和 TTL 到期都会写入审计事件；进程重启不会丢失状态。
+
+真实发送前最后一次状态检查与远端 WebSocket 调用之间仍有极窄竞态窗口。平台没有事务式“接管 + 撤回发送”接口，因此已经进入远端调用的消息无法保证撤回；项目明确保留这一工程边界。
 
 ### 12. 可扩展 Agent 注册表与模型降级
 
@@ -227,6 +244,7 @@ Falses-Goofish-GuardAgent/
 │   ├── api_request_replay.py   # API 请求领取、冲突检测与完成态响应回放
 │   ├── experts.py              # BargainExpert 与 FAQExpert
 │   ├── human_style.py          # 真人卖家回复风格约束与机器腔清洗
+│   ├── manual_takeover.py      # 跨进程人工接管状态、TTL 与审计日志
 │   ├── message_aggregation.py  # 连续买家消息 debounce 聚合
 │   ├── model_provider.py       # Agnes / OpenAI-compatible 模型配置
 │   ├── observability.py        # AgentTrace 可观测结构
@@ -254,6 +272,7 @@ Falses-Goofish-GuardAgent/
 │   ├── test_agents.py          # 核心策略单元测试
 │   ├── test_agent_runtime.py   # 扩展注册、模型降级与配置诊断测试
 │   ├── test_message_aggregation.py # 消息聚合状态机测试
+│   ├── test_manual_takeover.py # 接管持久化、跨实例可见性与 TTL 测试
 │   ├── test_product_rules.py   # 规则中心与交付决策测试
 │   ├── test_human_style.py     # 真人化回复风格测试
 │   ├── test_reply_outbox.py    # 回复执行 Outbox 去重与重试测试
@@ -357,6 +376,8 @@ uvicorn api.app:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
 浏览器打开 `http://127.0.0.1:8000/` 使用卖家操作台，打开 `/docs` 调试 API。页面默认不写入本地记忆，生成的回复也不会发送到闲鱼；勾选“写入本地对话记忆”只影响 API 演示数据库。离线模式适合演示和 CI；真实模型模式默认需要配置 `AGNES_API_KEY`，也可通过 `API_KEY`、`MODEL_BASE_URL` 和 `MODEL_NAME` 接入其它 OpenAI-compatible 服务。
+
+启动 Worker 后，在控制台打开“人工接管”，填写真实 `chat_id` 并确认即可暂停该会话。控制台与 Worker 必须使用相同的 `MANUAL_TAKEOVER_DB_PATH`；仓库默认值和 Docker Compose 的共享 `./data:/app/data` 已满足这一条件。恢复自动回复是显式高风险操作，页面会二次确认。
 
 ### 5. 闲鱼挂机运行
 
@@ -482,9 +503,11 @@ python tools/run_agent_eval.py --min-score 1.0
 | `SQLITE_BUSY_TIMEOUT_MS` | SQLite 锁等待时间，默认 30000 毫秒 |
 | `API_REQUEST_REPLAY_DB_PATH` | API 完成态响应回放数据库，默认 `data/api_request_replay.db` |
 | `API_REQUEST_REPLAY_LEASE_SECONDS` | 请求处理中租约秒数，默认 `60`；失败或超时后允许恢复 |
+| `MANUAL_TAKEOVER_DB_PATH` | API 控制台与 Worker 共享的接管 SQLite，默认 `data/manual_takeovers.db` |
+| `MANUAL_MODE_TIMEOUT` | 卖家消息命令触发接管时的默认 TTL，默认 `3600` 秒 |
 | `RUNTIME_STATUS_PATH` | live worker 无密钥状态快照路径，默认 `logs/runtime_status.json` |
 | `RUNTIME_STATUS_STALE_SECONDS` | 状态快照陈旧阈值，默认 `45` 秒 |
-| `TOGGLE_KEYWORDS` | 人工接管切换关键词，默认 `。` |
+| `TOGGLE_KEYWORDS` | 人工接管精确切换命令，多个命令用逗号分隔，默认 `。` |
 | `SIMULATE_HUMAN_TYPING` | 是否模拟真人输入延迟 |
 | `LOG_LEVEL` | 日志级别 |
 

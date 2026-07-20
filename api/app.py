@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field, field_validator
 from core.api_request_replay import ApiRequestReplayStore, RequestReplayConflict
 from core.evaluation import DeterministicLLMClient
 from core.message_aggregation import MessageBatch
+from core.manual_takeover import ManualTakeoverStore
 from core.model_provider import has_model_api_key
 from core.runtime_status import build_runtime_status_report
 from core.trace_store import JsonlTraceStore
@@ -76,6 +77,21 @@ class ReplyRequest(BaseModel):
         if any(len(message) > 1000 for message in normalized):
             raise ValueError("additional messages must not exceed 1000 characters")
         return normalized
+
+
+class TakeoverRequest(BaseModel):
+    active: bool = True
+    item_id: Optional[str] = Field(default=None, max_length=128)
+    ttl_seconds: int = Field(default=3600, ge=60, le=86400)
+    note: Optional[str] = Field(default=None, max_length=500)
+
+    @field_validator("item_id", "note")
+    @classmethod
+    def normalize_optional_text(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
 
 
 class MemorySnapshotResponse(BaseModel):
@@ -160,11 +176,12 @@ def create_app(
     request_replay_path: Optional[str] = None,
     access_token: Optional[str] = None,
     runtime_status_path: Optional[str] = None,
+    manual_takeover_path: Optional[str] = None,
 ) -> FastAPI:
     docs_enabled = _env_flag("API_DOCS_ENABLED", True)
     app = FastAPI(
         title="Falses Goofish GuardAgent API",
-        version="0.4.0",
+        version="0.5.0",
         description="Service API for local-first Xianyu / Goofish AI customer-service agent.",
         docs_url="/docs" if docs_enabled else None,
         redoc_url="/redoc" if docs_enabled else None,
@@ -180,6 +197,7 @@ def create_app(
         trace_path or os.getenv("AGENT_TRACE_PATH", "logs/agent_traces.jsonl")
     )
     app.state.request_replays = ApiRequestReplayStore(request_replay_path)
+    app.state.manual_takeovers = ManualTakeoverStore(manual_takeover_path)
     # XianyuReplyBot exposes mutable last_intent/last_trace for legacy callers.
     # Keep one explicit service boundary until the core returns immutable decisions.
     app.state.decision_lock = RLock()
@@ -256,6 +274,7 @@ def create_app(
             Path(app.state.bot.db.db_path).parent,
             app.state.trace_store.path.parent,
             Path(app.state.request_replays.path).parent,
+            Path(app.state.manual_takeovers.path).parent,
         ]
         storage_checks = []
         for storage_path in storage_paths:
@@ -316,6 +335,7 @@ def create_app(
         bot: XianyuReplyBot = app.state.bot
         records = app.state.trace_store.tail(50)
         traces = [record.get("trace", {}) for record in records]
+        active_takeover_count = app.state.manual_takeovers.count(active_only=True)
         fallback_count = sum(_contains_fallback(trace.get("model", {})) for trace in traces)
         return {
             "api": {
@@ -333,6 +353,9 @@ def create_app(
                 "fallback_count": fallback_count,
                 "guardrail_count": sum(bool(trace.get("guardrails")) for trace in traces),
                 "last_recorded_at": records[-1].get("timestamp") if records else None,
+            },
+            "takeovers": {
+                "active_count": active_takeover_count,
             },
         }
 
@@ -439,6 +462,69 @@ def create_app(
         _: None = Depends(require_access),
     ) -> MemorySnapshotResponse:
         return _snapshot_to_response(app.state.bot.db.get_memory_snapshot(chat_id))
+
+    @app.get("/api/takeovers")
+    def takeovers(
+        active_only: bool = Query(True),
+        limit: int = Query(100, ge=1, le=200),
+        _: None = Depends(require_access),
+    ) -> Dict[str, Any]:
+        records = app.state.manual_takeovers.list(active_only=active_only, limit=limit)
+        return {"count": len(records), "items": [record.to_dict() for record in records]}
+
+    @app.get("/api/takeovers/events")
+    def takeover_events(
+        chat_id: Optional[str] = Query(
+            None,
+            min_length=1,
+            max_length=128,
+            pattern=r".*\S.*",
+        ),
+        limit: int = Query(100, ge=1, le=200),
+        _: None = Depends(require_access),
+    ) -> Dict[str, Any]:
+        events = app.state.manual_takeovers.list_events(chat_id=chat_id, limit=limit)
+        return {"count": len(events), "items": events}
+
+    @app.get("/api/takeovers/{chat_id}")
+    def takeover(
+        chat_id: str = ApiPath(..., min_length=1, max_length=128, pattern=r".*\S.*"),
+        _: None = Depends(require_access),
+    ) -> Dict[str, Any]:
+        record = app.state.manual_takeovers.get(chat_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="takeover_not_found")
+        return record.to_dict()
+
+    @app.put("/api/takeovers/{chat_id}")
+    def update_takeover(
+        request: TakeoverRequest,
+        chat_id: str = ApiPath(..., min_length=1, max_length=128, pattern=r".*\S.*"),
+        _: None = Depends(require_access),
+    ) -> Dict[str, Any]:
+        if request.active:
+            record = app.state.manual_takeovers.enable(
+                chat_id,
+                item_id=request.item_id,
+                ttl_seconds=request.ttl_seconds,
+                source="operator_console",
+                note=request.note,
+            )
+        else:
+            record = app.state.manual_takeovers.disable(
+                chat_id,
+                source="operator_console",
+                note=request.note,
+            )
+        return record.to_dict()
+
+    @app.delete("/api/takeovers/{chat_id}")
+    def release_takeover(
+        chat_id: str = ApiPath(..., min_length=1, max_length=128, pattern=r".*\S.*"),
+        _: None = Depends(require_access),
+    ) -> Dict[str, Any]:
+        record = app.state.manual_takeovers.disable(chat_id, source="operator_console")
+        return record.to_dict()
 
     @app.get("/api/traces")
     def traces(

@@ -10,12 +10,13 @@
 
 - 重构 `IntentRouter -> TechAgent / PriceAgent / DefaultAgent -> Guardrails -> LLM` 多 Agent 架构，通过可插拔注册表、商品事实检索和真人化表达层支持咨询、砍价与交易疑虑场景；真实 Agnes 三轮演示全部正常返回，Trace 可解释路由、知识来源、护栏及各阶段耗时。
 - 将议价底线从 Prompt 剥离为确定性 `BargainExpert`，结合商品级 `min_price`、历史最低承诺价与买家最高报价生成单调价格决策；实测对 3500 元报价拒绝并反报价 4149 元，严格高于 3800 元底线。
-- 设计 SQLite 会话记忆与 Reply Outbox，原子记录用户/助手完整 turn，基于源事件哈希、事务 claim、状态机和超时租约抑制重连重复发送；离线 replay 验证重复事件只写入一轮记忆且网络发送为 0。
+- 设计 SQLite 会话记忆与 Reply Outbox，以终态驱动、源事件幂等方式提交用户/助手 turn，基于事件哈希、事务 claim、状态机和超时租约抑制重连重复发送；失败发送不写助手记忆，离线 replay 验证重复事件只写入一轮且网络发送为 0。
+- 将人工接管从 Worker 内存集合重构为跨进程 SQLite 状态机，支持控制台/卖家命令双入口、TTL 自动恢复与完整审计；在 Agent 前后、Outbox 领取和网络发送前设置多重门禁，并以两阶段状态提交避免未发送报价污染会话承诺。
 - 完成真实闲鱼 Token 获取、WebSocket 注册、小时级 Token 刷新与断线重连验证；根据约 5.5 小时运行日志定位 DNS 暂态故障误判与陈旧认证错误问题，引入 typed transient error、HTTP 超时、有限重试及成功后状态清理，避免无人值守进程错误退出或放大平台请求。
 - 为业务心跳增加超时主动断链，并实现带抖动的指数重连退避；设计无密钥原子运行状态快照与 stale 检测，支持通过 CLI/守护进程判断注册、重连、心跳超时和认证失败，避免半开连接与断网请求风暴。
 - 将同步 Token/商品 API 与 Agnes SDK 调用迁移到工作线程，通过异步锁保护共享 HTTP Session 和 Agent Trace 状态，使慢模型与上游超时不再阻塞 WebSocket 心跳和消息消费循环。
 - 构建本地卖家操作台，聚合 worker 在线状态、dry-run 安全态、Agent 模拟、价格决策、规则护栏、记忆与 Trace；增加可选 Bearer 鉴权、ready/live 探针、安全响应头和桌面/移动端响应式布局，浏览器实测无横向溢出，正文与主按钮对比度分别为 17.84:1、4.63:1。
-- 建立 `doctor / status / smoke / demo / replay / golden eval` 分层验证体系和 CI 门禁，覆盖模型故障降级、跨商品事实隔离、混合规格与报价路由、价格底线、规则承诺、Outbox 并发、API 请求回放、事件循环阻塞、状态陈旧、敏感字段污染和认证失败路径；当前 92 项 pytest、8 个场景 11 轮 golden eval 全部通过，并由 CI 持续验证 `websockets 13.1 / 15.x` 兼容性。
+- 建立 `doctor / status / smoke / demo / replay / golden eval` 分层验证体系和 CI 门禁，覆盖模型故障降级、跨商品事实隔离、混合规格与报价路由、价格底线、规则承诺、人工接管、Outbox 并发、API 请求回放、事件循环阻塞、状态陈旧、敏感字段污染和认证失败路径；当前 118 项 pytest、8 个场景 11 轮 golden eval 全部通过，并由 CI 持续验证 `websockets 13.1 / 15.x` 兼容性。
 
 **项目链接：** https://github.com/falses00/Falses-Goofish-GuardAgent
 
@@ -57,6 +58,7 @@ Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、HTML/CSS/JavaScr
 - 设计商品规则中心，将允许承诺、禁止承诺、售后边界和发货条件从 Prompt 中抽离为结构化 JSON 规则；回复前注入规则上下文，回复后做禁止承诺校验，避免模型编造成功率、内部渠道、平台外交易等高风险话术。
 - 设计真人化回复风格层，将“像真实闲鱼个人卖家”从 prompt 口号落成可配置护栏；生成前注入口语化约束，生成后确定性清洗“作为 AI 客服”“感谢咨询”等机器腔表达，并将改写结果写入 Trace。
 - 设计回复执行 Outbox，在真实 WebSocket 发送前持久化回复，基于 SQLite 原子事务实现并发安全 claim 与 `pending / sending / sent / failed / skipped` 状态流转；失败恢复复用原回复、避免二次 LLM 调用和重复记忆写入，并通过超时 lease 恢复进程崩溃造成的卡单，同时明确远端无幂等键时的 ACK 重复窗口。
+- 设计持久化 human-in-the-loop 控制面，以 `chat_id` 为隔离边界管理人工接管、TTL 与审计事件；API console 和 live Worker 共享 SQLite 事实源，价格 Agent 采用“无副作用生成 -> Outbox 持久化 -> 终态驱动记忆”，并通过对抗测试验证生成中接管、入队后接管、跨实例同步和 pending Outbox 取消。
 - 实现交付决策引擎，根据商品类型、订单状态和是否需要人工确认输出 `wait_for_payment / manual_review / auto_deliver` 等可审计动作，为后续自动发货执行层提供安全前置判断。
 - 设计 `BargainExpert` 确定性议价策略，将价格底线、历史承诺价、买家最高出价从 LLM Prompt 中剥离为代码级约束，避免模型被诱导突破底价或前后报价不一致。
 - 基于 SQLite 实现会话级状态记忆，持久化聊天历史、议价次数、我方最低承诺价和买家最高出价；通过事务化 `append_turn` 原子写入用户消息、助手回复和议价次数，避免半轮上下文污染，并采用单调更新策略保证价格承诺只降不升、买家报价只取最高。
@@ -95,7 +97,7 @@ Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、HTML/CSS/JavaScr
 如果需要放在简历里更偏结果，可以写：
 
 - 将原项目从单一自动回复改造为 4 类 Agent 协同链路，补齐价格护栏、商品事实约束、会话记忆、服务接口、trace 回放和本地调试能力。
-- 为核心决策路径建立 92 项单元 / API 回归测试，覆盖正常路径、边界值、错误配置、对抗输入、动态 Agent 注册、模型超时降级、跨商品事实隔离、消息聚合状态机、真人化回复、Outbox/API 请求并发 claim、续租 fencing、失败恢复、租约回收、跨进程存储竞争、规则护栏、交付决策和 HTTP 失败路径。
+- 为核心决策路径建立 118 项单元 / API 回归测试，覆盖正常路径、边界值、错误配置、对抗输入、动态 Agent 注册、模型超时降级、跨商品事实隔离、消息聚合状态机、真人化回复、人工接管、Outbox/API 请求并发 claim、续租 fencing、失败恢复、租约回收、跨进程存储竞争、规则护栏、交付决策和 HTTP 失败路径。
 - 将真实闲鱼挂机链路与本地 Mock 演示链路统一到同一套 Agent 决策核心，降低调试和演示对平台 Cookie 的依赖。
 - 基于黄金交易场景构建离线 Agent eval gate，检查 intent、routed agent、guardrails、RAG grounding、price decision 和 memory consistency，避免只用最终自然语言回复判断质量。
 
