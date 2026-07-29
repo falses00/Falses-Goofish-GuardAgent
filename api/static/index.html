@@ -7,8 +7,8 @@
     <meta name="description" content="Falses Goofish GuardAgent 本地运营控制台">
     <title>GuardAgent Console</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/static/styles.css?v=20260720.1">
-    <script src="/static/app.js?v=20260720.1" defer></script>
+    <link rel="stylesheet" href="/static/styles.css?v=20260729.1">
+    <script src="/static/app.js?v=20260729.1" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -18,7 +18,7 @@
     <div class="app-shell">
       <aside class="app-sidebar" id="appSidebar" aria-label="操作台导航">
         <div class="sidebar-topline">
-          <a class="brand-lockup" href="#dashboard" aria-label="返回运营总览">
+          <a class="brand-lockup" href="#inbox" aria-label="返回实时会话">
             <span class="brand-mark" aria-hidden="true">
               <svg viewBox="0 0 24 24" role="img">
                 <path d="M13 2 4.5 13h6L9 22l10.5-13h-6L13 2Z"></path>
@@ -37,7 +37,12 @@
 
         <nav class="sidebar-nav" aria-label="主要功能">
           <p class="nav-label">运营</p>
-          <button class="nav-item" type="button" data-view="dashboard" aria-current="page">
+          <button class="nav-item" type="button" data-view="inbox" aria-current="page">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v12H8l-4 3V5Z"></path><path d="M8 9h8M8 13h5"></path></svg>
+            <span>实时会话</span>
+            <small id="sidebarInboxCount">读取中</small>
+          </button>
+          <button class="nav-item" type="button" data-view="dashboard">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg>
             <span>运营总览</span>
             <small id="sidebarOverviewState">实时</small>
@@ -72,7 +77,7 @@
             <span class="live-dot" aria-hidden="true"></span>
           </div>
           <strong>本地安全模式</strong>
-          <p>操作台只生成与审计回复，不会直接触达买家。</p>
+          <p>监控真实消息与交付状态；网页端接管不会绕过 Worker 安全边界。</p>
         </section>
 
         <p class="sidebar-version">Console v2 · Local first</p>
@@ -131,9 +136,9 @@
 
           <header class="page-header">
             <div>
-              <p class="page-eyebrow" id="pageEyebrow">运营中心</p>
-              <h1 id="pageTitle" tabindex="-1">运营总览</h1>
-              <p class="page-description" id="pageDescription">查看 Agent 决策质量、运行风险与最近活动。</p>
+              <p class="page-eyebrow" id="pageEyebrow">Live seller inbox</p>
+              <h1 id="pageTitle" tabindex="-1">实时会话</h1>
+              <p class="page-description" id="pageDescription">监控买家消息、Agent 回复、发送状态与人工接管。</p>
             </div>
             <div class="page-header-actions">
               <span class="updated-time" id="overviewUpdatedAt">正在读取运行快照</span>
@@ -156,7 +161,85 @@
             <button class="button button-secondary button-compact" id="openRuntimeButton" type="button">查看处理步骤</button>
           </section>
 
-          <section class="workspace-view dashboard-view" id="view-dashboard" data-workspace-view="dashboard" aria-labelledby="dashboardTitle">
+          <section class="workspace-view inbox-view" id="view-inbox" data-workspace-view="inbox" aria-labelledby="inboxViewTitle">
+            <h2 class="sr-only" id="inboxViewTitle">实时卖家会话工作区</h2>
+
+            <div class="inbox-mobile-tabs" role="tablist" aria-label="会话面板">
+              <button type="button" role="tab" aria-selected="true" data-inbox-mobile-panel="queue">队列</button>
+              <button type="button" role="tab" aria-selected="false" data-inbox-mobile-panel="thread">对话</button>
+              <button type="button" role="tab" aria-selected="false" data-inbox-mobile-panel="context">上下文</button>
+            </div>
+
+            <div class="inbox-layout" id="inboxLayout" data-mobile-panel="queue">
+              <section class="inbox-queue" aria-labelledby="inboxQueueTitle">
+                <div class="inbox-panel-heading">
+                  <div><p class="section-kicker">Attention queue</p><h2 id="inboxQueueTitle">会话队列</h2></div>
+                  <div class="inbox-live-state" id="inboxStreamStatus" data-tone="loading"><span></span><strong>连接中</strong></div>
+                </div>
+                <div class="inbox-search-field">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
+                  <label class="sr-only" for="inboxSearch">搜索实时会话</label>
+                  <input id="inboxSearch" type="search" placeholder="买家、消息、商品或会话 ID" autocomplete="off">
+                </div>
+                <div class="inbox-filter-row">
+                  <label for="inboxStateFilter">状态</label>
+                  <select id="inboxStateFilter">
+                    <option value="">全部会话</option>
+                    <option value="takeover">人工接管</option>
+                    <option value="failed">发送失败</option>
+                    <option value="pending">等待处理</option>
+                    <option value="review">需要复核</option>
+                    <option value="handled">已处理</option>
+                  </select>
+                  <button class="icon-button inbox-stream-toggle" id="inboxStreamToggle" type="button" aria-label="暂停实时更新" title="暂停实时更新">
+                    <svg class="stream-pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6v12M15 6v12"></path></svg>
+                    <svg class="stream-play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z"></path></svg>
+                  </button>
+                </div>
+                <div class="inbox-counts" aria-live="polite">
+                  <span><strong id="inboxAttentionCount">0</strong> 待处理</span>
+                  <span><strong id="inboxTotalCount">0</strong> 全部</span>
+                </div>
+                <div class="inbox-list" id="inboxList" aria-live="polite" aria-busy="true"></div>
+                <div class="inbox-queue-state" id="inboxEmpty" hidden><strong>暂无匹配会话</strong><p>新买家消息进入 Worker 后会自动出现在这里。</p></div>
+                <div class="inbox-queue-state inbox-error" id="inboxError" role="alert" hidden><strong id="inboxErrorTitle">无法读取会话</strong><p id="inboxErrorMessage"></p><button class="button button-secondary button-compact" id="inboxErrorAction" type="button">重试</button></div>
+              </section>
+
+              <section class="inbox-thread" aria-labelledby="conversationTitle">
+                <div class="conversation-placeholder" id="conversationEmpty">
+                  <span class="empty-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v12H8l-4 3V5Z"></path><path d="M8 9h8M8 13h5"></path></svg></span>
+                  <strong>选择一条真实会话</strong>
+                  <p>消息时间线会保留买家原文、人工回复和 Agent 交付状态。</p>
+                </div>
+                <div class="conversation-content" id="conversationContent" hidden>
+                  <header class="conversation-header">
+                    <div class="conversation-identity">
+                      <span class="conversation-avatar" id="conversationAvatar">买</span>
+                      <div><div class="conversation-title-row"><h2 id="conversationTitle">买家</h2><span id="conversationStateBadge" class="inbox-state-badge"></span></div><p id="conversationSubtitle"></p></div>
+                    </div>
+                    <button class="button button-secondary button-compact" id="inboxTakeoverButton" type="button">人工接管</button>
+                  </header>
+                  <div class="message-timeline" id="messageTimeline" aria-live="polite" aria-busy="false"></div>
+                  <footer class="conversation-safety-bar">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 6v5c0 5 3.4 8.3 8 10 4.6-1.7 8-5 8-10V6l-8-3Z"></path><path d="m9 12 2 2 4-4"></path></svg>
+                    <p><strong>网页端当前只做监控与接管。</strong><span>人工回复请在闲鱼客户端发送，Worker 会同步回本时间线。</span></p>
+                  </footer>
+                </div>
+              </section>
+
+              <aside class="inbox-context" aria-labelledby="inboxContextTitle">
+                <div class="inbox-panel-heading context-heading"><div><p class="section-kicker">Conversation context</p><h2 id="inboxContextTitle">会话上下文</h2></div><button class="text-button" id="inboxOpenTraceButton" type="button" disabled>查看 Trace</button></div>
+                <div class="context-empty" id="inboxContextEmpty"><p>选择会话后查看商品、买家、Agent 路由、护栏与交付证据。</p></div>
+                <div class="context-content" id="inboxContextContent" hidden>
+                  <section class="context-section"><h3>会话信息</h3><dl class="context-data-list" id="inboxIdentityContext"></dl></section>
+                  <section class="context-section"><h3>Agent 决策</h3><dl class="context-data-list" id="inboxDecisionContext"></dl></section>
+                  <section class="context-section"><h3>安全与交付</h3><div class="context-badge-list" id="inboxGuardrailContext"></div><dl class="context-data-list" id="inboxDeliveryContext"></dl></section>
+                </div>
+              </aside>
+            </div>
+          </section>
+
+          <section class="workspace-view dashboard-view" id="view-dashboard" data-workspace-view="dashboard" aria-labelledby="dashboardTitle" hidden>
             <h2 class="sr-only" id="dashboardTitle">Agent 运营总览</h2>
 
             <div class="metric-grid" id="metricGrid" aria-live="polite" aria-busy="true">

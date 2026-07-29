@@ -8,7 +8,7 @@
 - 商品详情咨询时，LLM 不能编造配件、成色、拆修、发货信息。
 - 本地演示和迭代时，不必每次都依赖真实 Cookie 和真实买家消息。
 
-当前版本保留原项目的闲鱼 WebSocket 长连接能力，并新增本地 Mock CLI、HTTP Agent API、SQLite 价格承诺记忆、持久化人工接管、硬规则议价护栏、JSON 商品知识库、商品规则中心、真人化回复风格层、回复执行 Outbox、交付决策引擎、JSONL trace 回放和针对核心策略的自动化测试 / Agent 评测门禁。
+当前版本保留原项目的闲鱼 WebSocket 长连接能力，并新增本地 Mock CLI、HTTP Agent API、实时卖家 Inbox、独立聊天事实流、SQLite 价格承诺记忆、持久化人工接管、硬规则议价护栏、JSON 商品知识库、商品规则中心、真人化回复风格层、回复执行 Outbox、交付决策引擎、JSONL trace 回放和针对核心策略的自动化测试 / Agent 评测门禁。
 
 仓库地址：[https://github.com/falses00/Falses-Goofish-GuardAgent](https://github.com/falses00/Falses-Goofish-GuardAgent)
 
@@ -23,6 +23,7 @@
 - **SQLite 负责记忆**：多轮会话中记录历史报价和买家最高出价。
 - **Style 负责人味**：拦截“作为 AI 客服”“感谢咨询”等机器腔，让回复更像真实个人卖家。
 - **Outbox 负责执行**：真实发送前先登记并原子抢占发送权；失败重试复用原回复，避免重复调用模型和重复写记忆。
+- **ChatEvent 负责事实**：买家、卖家和 Agent 消息进入独立 SQLite 事件流，不会因短期 Agent 记忆裁剪而从运营时间线消失。
 - **人工接管负责止损**：API 控制台与 Worker 共享 SQLite 接管状态，重启后仍生效；新决策和待发送回复都会被终止。
 - **Trace 负责解释**：每轮回复记录路由、护栏、定价来源和知识命中。
 - **本地模式负责调试**：不接入闲鱼也能复现议价和咨询链路。
@@ -99,6 +100,18 @@ python main.py --mode demo
 - `price_decision`：原价、底价、底价来源、买家报价、历史承诺和最终动作。
 - `knowledge`：商品知识库是否命中，以及注入了哪些事实。
 
+### 6.1 实时卖家 Inbox
+
+Worker 在收到平台聊天消息后先写入 `core/chat_event_store.py` 的独立 SQLite 事实流，再进入消息聚合、Agent 与 Outbox。`core/seller_inbox.py` 将聊天事件、Outbox 交付状态和人工接管状态合成为运营读模型：
+
+- 左侧会话队列按真实活动时间显示 `人工接管 / 发送失败 / 等待处理 / 需要复核 / 已处理`，支持买家、消息、商品和会话搜索。
+- 中间时间线区分买家原文、卖家人工消息和 Agent 回复，并展示 `pending / sending / sent / failed / simulated / cancelled` 等真实交付状态。
+- 右侧上下文展示商品、买家、路由 Agent、价格决策、护栏、降级和失败原因。
+- 浏览器通过同源、Bearer 鉴权的 SSE 接收增量快照；断线时明确显示“轮询恢复”，每 3 秒刷新并周期性重连。
+- 宽屏桌面使用三栏工作区；1120px 以下切换为“队列 / 对话 / 上下文”三个可触达面板。
+
+这里有意把“运营聊天事实”与“Agent 短期记忆”分开：`messages` 仍可按 `max_history` 裁剪以控制模型上下文，`chat_events` 则保留客服台所需的可审计时间线。网页端当前只做监控与人工接管；FastAPI 进程不持有 live Worker 的闲鱼 WebSocket，因此在实现持久化命令队列前不会提供一个看似可用、实际无法可靠发送的输入框。
+
 ### 7. Agent HTTP API
 
 ```bash
@@ -106,13 +119,16 @@ $env:API_OFFLINE_MODE="true"
 uvicorn api.app:app --host 127.0.0.1 --port 8000
 ```
 
-服务化入口会复用同一套 `XianyuReplyBot` 决策核心，并在根路径提供本地卖家运营台。浏览器打开 `http://127.0.0.1:8000/`，可在“运营总览 / 回复试跑 / 人工接管 / 决策记录 / 运行状态”之间切换：总览聚合真实 Worker、Trace、护栏与实时活动；回复试跑安全模拟买家消息；人工接管按会话暂停自动决策并查看审计记录；决策记录按意图和状态筛选 Trace；运行状态提供心跳证据与恢复步骤。控制台的模拟回复不会调用闲鱼发送接口，默认也不会写入会话记忆。前端调研、Notion 范式与设计取舍见 [`docs/FRONTEND_RESEARCH_2026-07.md`](docs/FRONTEND_RESEARCH_2026-07.md)。
+服务化入口会复用同一套 `XianyuReplyBot` 决策核心，并在根路径提供本地卖家运营台。浏览器打开 `http://127.0.0.1:8000/`，默认进入“实时会话”，也可切换到“运营总览 / 回复试跑 / 人工接管 / 决策记录 / 运行状态”：实时会话监控真实聊天、Outbox 交付与接管状态；总览聚合真实 Worker、Trace 和护栏；回复试跑安全模拟买家消息；人工接管按会话暂停自动决策并查看审计记录；决策记录按意图和状态筛选 Trace；运行状态提供心跳证据与恢复步骤。控制台的模拟回复不会调用闲鱼发送接口，默认也不会写入会话记忆。项目与交互调研见 [`docs/REALTIME_INBOX_RESEARCH_2026-07.md`](docs/REALTIME_INBOX_RESEARCH_2026-07.md) 和 [`docs/FRONTEND_RESEARCH_2026-07.md`](docs/FRONTEND_RESEARCH_2026-07.md)。
 
 核心接口：
 
 - `GET /health`：健康检查，并返回是否处于离线 deterministic LLM 模式。
 - `GET /health/live`：进程存活探针；`GET /health/ready`：检查 Agent、存储目录和控制台资源。
 - `GET /api/overview`：返回无敏感正文的 API、Worker、Agent 与 Trace 摘要。
+- `GET /api/inbox?query=...&state=...`：返回实时会话队列、状态计数和快照版本。
+- `GET /api/inbox/{chat_id}`：返回单会话时间线、接管状态和最新决策证据。
+- `GET /api/inbox/stream`：Bearer 鉴权 SSE；事实流或 Outbox/接管状态变化时推送新快照。
 - `GET /api/runtime-status`：返回 live worker 的原子运行快照。
 - `GET /api/capabilities`：列出当前已注册的业务意图，便于管理台或 MCP 动态发现能力。
 - `POST /api/reply`：输入买家消息、商品信息和会话 ID，返回回复、意图、trace 和 memory snapshot；可带 `request_id` 获得完成态请求回放保护。
@@ -121,7 +137,7 @@ uvicorn api.app:app --host 127.0.0.1 --port 8000
 - `PUT /api/takeovers/{chat_id}`、`DELETE /api/takeovers/{chat_id}`：接管会话或恢复自动回复；接管最长 24 小时并自动过期。
 - `GET /api/traces?limit=20&chat_id=...&intent=...`：过滤最近的 JSONL trace，便于排查和回放。
 
-API 默认只建议绑定 `127.0.0.1`。设置 `API_ACCESS_TOKEN` 后，回复、记忆、人工接管和 Trace 接口要求 `Authorization: Bearer <token>`；控制台令牌只保存在当前标签页的 `sessionStorage`。生产环境可设置 `API_DOCS_ENABLED=false` 关闭 Swagger/ReDoc。由于决策核心仍包含兼容旧调用方的可变 Trace 状态，API 部署固定使用单 worker，由进程内锁保证请求隔离；横向扩展前应先把决策结果重构为不可变返回值。
+API 默认只建议绑定 `127.0.0.1`。设置 `API_ACCESS_TOKEN` 后，回复、记忆、实时会话、人工接管和 Trace 接口要求 `Authorization: Bearer <token>`；SSE 使用请求头鉴权，不把令牌暴露在 URL 中，控制台令牌只保存在当前标签页的 `sessionStorage`。生产环境可设置 `API_DOCS_ENABLED=false` 关闭 Swagger/ReDoc。由于决策核心仍包含兼容旧调用方的可变 Trace 状态，API 部署固定使用单 worker，由进程内锁保证请求隔离；横向扩展前应先把决策结果重构为不可变返回值。
 
 示例：
 
@@ -242,6 +258,7 @@ Falses-Goofish-GuardAgent/
 │   ├── __init__.py
 │   ├── agent_registry.py       # 可插拔 Agent 注册、解析与回退契约
 │   ├── api_request_replay.py   # API 请求领取、冲突检测与完成态响应回放
+│   ├── chat_event_store.py     # 买家、卖家、Agent 消息与交付状态事实流
 │   ├── experts.py              # BargainExpert 与 FAQExpert
 │   ├── human_style.py          # 真人卖家回复风格约束与机器腔清洗
 │   ├── manual_takeover.py      # 跨进程人工接管状态、TTL 与审计日志
@@ -250,6 +267,7 @@ Falses-Goofish-GuardAgent/
 │   ├── observability.py        # AgentTrace 可观测结构
 │   ├── product_rules.py        # 商品规则中心与交付决策
 │   ├── reply_outbox.py         # 自动回复执行 Outbox 与重复发送防护
+│   ├── seller_inbox.py         # 会话队列、详情与接管状态运营读模型
 │   ├── runtime_config.py       # 无密钥泄露的启动就绪诊断
 │   ├── evaluation.py           # 离线 LLM stub 与 Agent 评测 harness
 │   └── trace_store.py          # JSONL trace 持久化与回放
@@ -266,6 +284,7 @@ Falses-Goofish-GuardAgent/
 ├── docs/
 │   ├── AGENT_DESIGN_NOTES.md
 │   ├── BIG_TECH_AGENT_READINESS.md
+│   ├── REALTIME_INBOX_RESEARCH_2026-07.md
 │   └── RESUME_PROJECT_EXPERIENCE.md
 ├── prompts/                    # 提示词模板，正式提示词默认不入库
 ├── tests/
@@ -278,6 +297,8 @@ Falses-Goofish-GuardAgent/
 │   ├── test_reply_outbox.py    # 回复执行 Outbox 去重与重试测试
 │   ├── test_api_request_replay.py # 请求回放状态机、冲突与租约测试
 │   ├── test_api.py             # HTTP API、控制台、认证与失败路径测试
+│   ├── test_chat_event_store.py # 聊天事实流幂等与状态迁移测试
+│   ├── test_seller_inbox.py    # 会话聚合、筛选、接管和兼容回退测试
 │   └── test_storage_hardening.py # WAL、busy timeout、跨进程 Trace 滚动与损坏恢复
 ├── .env.example                # 配置模板
 ├── requirements.txt
@@ -375,9 +396,9 @@ $env:API_OFFLINE_MODE="true"
 uvicorn api.app:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-浏览器打开 `http://127.0.0.1:8000/` 使用卖家操作台，打开 `/docs` 调试 API。页面默认不写入本地记忆，生成的回复也不会发送到闲鱼；勾选“写入本地对话记忆”只影响 API 演示数据库。离线模式适合演示和 CI；真实模型模式默认需要配置 `AGNES_API_KEY`，也可通过 `API_KEY`、`MODEL_BASE_URL` 和 `MODEL_NAME` 接入其它 OpenAI-compatible 服务。
+浏览器打开 `http://127.0.0.1:8000/` 使用卖家操作台，打开 `/docs` 调试 API。单独启动 API 时可使用 Inbox、回复试跑和审计能力；要看真实闲鱼消息，需要同时运行 Worker，并确保两端共享 `CHAT_EVENT_DB_PATH`、`REPLY_OUTBOX_DB_PATH` 与 `MANUAL_TAKEOVER_DB_PATH`。回复试跑默认不写入本地记忆，也不会发送到闲鱼；勾选“写入本地对话记忆”只影响 API 演示数据库。离线模式适合演示和 CI；真实模型模式默认需要配置 `AGNES_API_KEY`，也可通过 `API_KEY`、`MODEL_BASE_URL` 和 `MODEL_NAME` 接入其它 OpenAI-compatible 服务。
 
-启动 Worker 后，在控制台打开“人工接管”，填写真实 `chat_id` 并确认即可暂停该会话。控制台与 Worker 必须使用相同的 `MANUAL_TAKEOVER_DB_PATH`；仓库默认值和 Docker Compose 的共享 `./data:/app/data` 已满足这一条件。恢复自动回复是显式高风险操作，页面会二次确认。
+启动 Worker 后，真实买家消息会自动进入控制台“实时会话”；在会话头部点击“人工接管”即可暂停该会话，也可在独立接管页填写真实 `chat_id`。控制台与 Worker 必须使用相同的三份 SQLite 路径；仓库默认值和 Docker Compose 的共享 `./data:/app/data` 已满足这一条件。恢复自动回复是显式高风险操作，页面会二次确认。
 
 ### 5. 闲鱼挂机运行
 
@@ -487,6 +508,7 @@ python tools/run_agent_eval.py --min-score 1.0
 | `PRODUCT_RULES_PATH` | 商品规则中心路径，默认 `data/product_rules.json` |
 | `HUMAN_REPLY_STYLE_PATH` | 真人卖家回复风格配置路径，默认 `data/human_reply_style.json` |
 | `REPLY_OUTBOX_DB_PATH` | 自动回复执行 Outbox SQLite 路径，默认 `data/reply_outbox.db` |
+| `CHAT_EVENT_DB_PATH` | 实时会话事实流 SQLite；控制台和 Worker 必须共享，默认 `data/chat_events.db` |
 | `REPLY_SEND_DRY_RUN` | 是否只记录 Outbox 而不真实发送，接真实 Cookie 前可设为 `true` |
 | `REPLY_SEND_CLAIM_TIMEOUT_SECONDS` | `sending` 状态的租约超时，默认 300 秒；超时后允许恢复发送 |
 | `MESSAGE_AGGREGATION_ENABLED` | 是否启用连续买家消息聚合，默认 `true` |
@@ -495,7 +517,7 @@ python tools/run_agent_eval.py --min-score 1.0
 | `MESSAGE_AGGREGATION_MAX_CHARS` | 单批最多字符数，达到后立即触发 |
 | `API_OFFLINE_MODE` | API 服务是否使用离线 deterministic LLM，演示 / CI 可设为 `true` |
 | `API_CHAT_DB_PATH` | API 服务使用的 SQLite 会话数据库路径 |
-| `API_ACCESS_TOKEN` | 可选 Bearer 访问令牌；设置后保护回复、记忆和 Trace 接口 |
+| `API_ACCESS_TOKEN` | 可选 Bearer 访问令牌；设置后保护回复、记忆、Inbox/SSE、接管和 Trace 接口 |
 | `API_DOCS_ENABLED` | 是否开放 Swagger/ReDoc，默认 `true` |
 | `AGENT_TRACE_PATH` | API 服务写入的 JSONL trace 文件路径 |
 | `AGENT_TRACE_MAX_BYTES` | 单个 Trace 文件上限，默认 10 MiB |
@@ -513,14 +535,16 @@ python tools/run_agent_eval.py --min-score 1.0
 
 ## 二开参考方向
 
-这次改造吸收了同类项目的几个方向，但保持当前仓库轻量：
+这次改造先核验同类项目的启动方式、代码路径和许可证，再吸收交互与架构模式，未复制 AGPL 项目源码：
 
-- `xianyu-auto-reply` 类项目的多账号、自动发货和人工接管队列思路，可作为现有卖家操作台的后续扩展方向。
+- `zhinianboke/xianyu-auto-reply` 的账户 / 会话 / 线程 / 工具区和 WebSocket 增量消息模式，转化为当前三栏卖家 Inbox。
+- `Usagi-org/ai-goofish-monitor` 的实时日志连接、自动滚动、断线重连与监控状态表达。
+- `Chatwoot` 等成熟客服台的 attention queue、会话上下文、筛选和 keyboard-first 交互。
 - 本地控制台类项目的商品专属策略、Ollama 兼容、本地长期托管思路。
 - `XianyuBot` 类项目的分层架构、多专家协同和 RAG 规划。
 - `XianYuApis` 的闲鱼 API / WebSocket 底座思路。
 
-本仓库当前优先把“报价安全、事实准确、本地可调试”做稳，再逐步扩展 UI、自动发货、多账号和统计分析。
+详细证据、参考项目版本与不照搬边界见 [`docs/REALTIME_INBOX_RESEARCH_2026-07.md`](docs/REALTIME_INBOX_RESEARCH_2026-07.md)。本仓库当前优先把“消息可见、报价安全、事实准确、接管可靠”做稳，再逐步扩展持久化发送命令、多账号和订单工作流。
 
 ## 合规与风险
 

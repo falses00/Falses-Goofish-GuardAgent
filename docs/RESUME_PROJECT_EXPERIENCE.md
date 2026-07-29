@@ -16,7 +16,7 @@
 - 为业务心跳增加超时主动断链，并实现带抖动的指数重连退避；设计无密钥原子运行状态快照与 stale 检测，支持通过 CLI/守护进程判断注册、重连、心跳超时和认证失败，避免半开连接与断网请求风暴。
 - 将同步 Token/商品 API 与 Agnes SDK 调用迁移到工作线程，通过异步锁保护共享 HTTP Session 和 Agent Trace 状态，使慢模型与上游超时不再阻塞 WebSocket 心跳和消息消费循环。
 - 构建本地卖家操作台，聚合 worker 在线状态、dry-run 安全态、Agent 模拟、价格决策、规则护栏、记忆与 Trace；增加可选 Bearer 鉴权、ready/live 探针、安全响应头和桌面/移动端响应式布局，浏览器实测无横向溢出，正文与主按钮对比度分别为 17.84:1、4.63:1。
-- 建立 `doctor / status / smoke / demo / replay / golden eval` 分层验证体系和 CI 门禁，覆盖模型故障降级、跨商品事实隔离、混合规格与报价路由、价格底线、规则承诺、人工接管、Outbox 并发、API 请求回放、事件循环阻塞、状态陈旧、敏感字段污染和认证失败路径；当前 118 项 pytest、8 个场景 11 轮 golden eval 全部通过，并由 CI 持续验证 `websockets 13.1 / 15.x` 兼容性。
+- 建立 `doctor / status / smoke / demo / replay / golden eval` 分层验证体系和 CI 门禁，覆盖模型故障降级、跨商品事实隔离、混合规格与报价路由、价格底线、规则承诺、人工接管、Outbox 并发、API 请求回放、事件循环阻塞、状态陈旧、敏感字段污染和认证失败路径；当前 131 项 pytest、8 个场景 11 轮 golden eval 全部通过，并由 CI 持续验证 `websockets 13.1 / 15.x` 兼容性。
 
 **项目链接：** https://github.com/falses00/Falses-Goofish-GuardAgent
 
@@ -43,7 +43,7 @@ Falses Goofish GuardAgent：闲鱼二手交易 AI 客服与议价安全 Agent
 
 ### 项目描述
 
-基于 Python、Agnes AI / OpenAI-compatible LLM、FastAPI、WebSocket、SQLite 与 Rich CLI 构建闲鱼 / Goofish AI 客服 Agent，在原有自动回复项目基础上重构决策链路，引入多 Agent 路由、确定性议价护栏、商品事实 RAG、真人化表达约束、回复执行 Outbox、会话状态记忆、可观测 Trace 和离线评测体系，支持本地 Mock 调试、HTTP 服务化集成与真实闲鱼长连接挂机。
+基于 Python、Agnes AI / OpenAI-compatible LLM、FastAPI、WebSocket、SQLite 与原生 Web 前端构建闲鱼 / Goofish AI 客服 Agent，在原有自动回复项目基础上重构决策与执行链路，引入多 Agent 路由、确定性议价护栏、商品事实 RAG、真人化表达约束、回复执行 Outbox、独立聊天事实流、实时卖家 Inbox、可观测 Trace 和离线评测体系，支持本地 Mock 调试、HTTP/SSE 服务化集成与真实闲鱼长连接挂机。
 
 ### 技术栈
 
@@ -58,6 +58,8 @@ Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、HTML/CSS/JavaScr
 - 设计商品规则中心，将允许承诺、禁止承诺、售后边界和发货条件从 Prompt 中抽离为结构化 JSON 规则；回复前注入规则上下文，回复后做禁止承诺校验，避免模型编造成功率、内部渠道、平台外交易等高风险话术。
 - 设计真人化回复风格层，将“像真实闲鱼个人卖家”从 prompt 口号落成可配置护栏；生成前注入口语化约束，生成后确定性清洗“作为 AI 客服”“感谢咨询”等机器腔表达，并将改写结果写入 Trace。
 - 设计回复执行 Outbox，在真实 WebSocket 发送前持久化回复，基于 SQLite 原子事务实现并发安全 claim 与 `pending / sending / sent / failed / skipped` 状态流转；失败恢复复用原回复、避免二次 LLM 调用和重复记忆写入，并通过超时 lease 恢复进程崩溃造成的卡单，同时明确远端无幂等键时的 ACK 重复窗口。
+- 将“Agent 短期记忆”与“运营聊天事实”解耦，设计 `ChatEventStore` 持久化买家、卖家和 Agent 事件，并以 Outbox dedupe key 原地同步交付状态；构建 `SellerInbox` 读模型聚合会话、失败、待处理、降级和接管状态，同时兼容升级前 legacy Outbox 数据。
+- 基于 FastAPI `StreamingResponse` 实现 Bearer 鉴权 SSE，事件/Outbox/接管版本变化时推送快照；前端断线后自动降级到 3 秒轮询并周期重连，令牌只通过请求头传输，不进入 URL 或持久化存储。
 - 设计持久化 human-in-the-loop 控制面，以 `chat_id` 为隔离边界管理人工接管、TTL 与审计事件；API console 和 live Worker 共享 SQLite 事实源，价格 Agent 采用“无副作用生成 -> Outbox 持久化 -> 终态驱动记忆”，并通过对抗测试验证生成中接管、入队后接管、跨实例同步和 pending Outbox 取消。
 - 实现交付决策引擎，根据商品类型、订单状态和是否需要人工确认输出 `wait_for_payment / manual_review / auto_deliver` 等可审计动作，为后续自动发货执行层提供安全前置判断。
 - 设计 `BargainExpert` 确定性议价策略，将价格底线、历史承诺价、买家最高出价从 LLM Prompt 中剥离为代码级约束，避免模型被诱导突破底价或前后报价不一致。
@@ -69,7 +71,7 @@ Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、HTML/CSS/JavaScr
 - 将 Agent core 服务化为 FastAPI backend，提供 typed reply、memory、trace、runtime status 与 readiness 接口；通过可选 Bearer 鉴权、请求关联 ID、安全响应头和单 worker 并发锁保护本地运营面，支持 Web 管理台、移动端自动化桥接或 MCP server 复用同一套决策能力。
 - 设计 `JsonlTraceStore` 追加式 trace 存储与 SQLite WAL 记忆层，增加跨进程文件锁、锁等待、容量上限和滚动归档；双进程对抗测试验证 80 次并发追加在滚动期间无崩溃、无丢失。
 - 为 API `request_id` 设计 owner token、自动续租和 fencing 机制，避免慢模型超过租约后被第二实例重复执行；两实例对抗测试验证 1 秒租约、2.2 秒模型调用仅写入一轮记忆和一条 Trace。
-- 构建无外部 CDN 的响应式卖家操作台，把 worker 状态、安全模拟、路由、报价、护栏、记忆和 Trace 组织为一个可操作界面；默认不落记忆、不发送闲鱼消息，令牌只保存在浏览器会话级存储。
+- 构建无外部 CDN 的响应式卖家操作台，以“实时会话”为默认入口，在桌面实现 queue / thread / context 三栏客服工作区，在移动端实现三面板切换；支持搜索、状态筛选、失败原因、交付状态、会话内人工接管和 Trace 下钻，并用 Playwright 在 1440x900、390x844 真实验证 SSE 更新、接管恢复和零横向溢出。
 - 构建本地 Mock CLI 调试模式，无需真实闲鱼 Cookie 即可模拟买家咨询和砍价，提升项目演示、策略调参和回归验证效率。
 - 使用 pytest 覆盖议价边界、历史承诺不抬价、商品级底价优先、无效折扣回退、规格数字误判报价、RAG 命中/未命中、SQLite 单调记忆、API 结构化响应和空消息 422 失败路径等核心路径。
 - 新增 `python main.py --mode smoke` 离线端到端自检，使用内置 LLM stub 真实穿过入口、路由、Agent、SQLite 记忆、Trace 和回复生成链路，降低回归验证对真实 Cookie/API Key 的依赖。
@@ -82,13 +84,14 @@ Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、HTML/CSS/JavaScr
 
 这个项目不是简单接一个大模型自动回复，而是把交易场景里最危险的决策从 LLM 中剥离出来。LLM 只负责表达，价格、商品事实和会话承诺由确定性代码与 SQLite 控制。
 
-我把系统拆成四层：
+我把系统拆成六层：
 
 1. **路由层**：先通过关键词和正则判断咨询、议价、闲聊，规则兜不住再交给分类 Agent。
 2. **策略层**：议价由 `BargainExpert` 计算安全价格，商品咨询由 `FAQExpert` 从本地 JSON 知识库抽取事实，商品规则中心控制承诺边界。
 3. **表达层**：把策略结果注入 Prompt，让 LLM 生成自然话术，再由 `HumanReplyStyler` 清洗机器腔和客服腔。
 4. **执行层**：真实发送前进入 Reply Outbox，按源消息去重并原子抢占发送权；发送失败只重试已落库回复，租约超时后可恢复中断任务。
 5. **服务与评测层**：FastAPI 暴露 typed contract，JSONL trace 支持回放，golden eval 和 pytest 在 CI 中阻断回归。
+6. **运营控制层**：独立 ChatEvent 事实流和 SellerInbox 读模型把真实消息、Outbox 交付、人工接管与决策证据汇总到实时三栏控制台，SSE 断线后有明确降级路径。
 
 为了让系统可调试，我加了 `AgentTrace`，每次回复都会记录意图、路由、价格决策、知识命中和护栏。这样出了问题不是猜 Prompt，而是能直接看到决策链路。
 
@@ -97,10 +100,10 @@ Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、HTML/CSS/JavaScr
 如果需要放在简历里更偏结果，可以写：
 
 - 将原项目从单一自动回复改造为 4 类 Agent 协同链路，补齐价格护栏、商品事实约束、会话记忆、服务接口、trace 回放和本地调试能力。
-- 为核心决策路径建立 118 项单元 / API 回归测试，覆盖正常路径、边界值、错误配置、对抗输入、动态 Agent 注册、模型超时降级、跨商品事实隔离、消息聚合状态机、真人化回复、人工接管、Outbox/API 请求并发 claim、续租 fencing、失败恢复、租约回收、跨进程存储竞争、规则护栏、交付决策和 HTTP 失败路径。
+- 为核心决策路径建立 131 项单元 / API 回归测试，覆盖正常路径、边界值、错误配置、对抗输入、动态 Agent 注册、模型超时降级、跨商品事实隔离、消息聚合状态机、真人化回复、聊天事件幂等、Inbox 聚合与 legacy 回退、SSE/API 鉴权、人工接管、Outbox/API 请求并发 claim、续租 fencing、失败恢复、租约回收、跨进程存储竞争、规则护栏、交付决策和 HTTP 失败路径。
 - 将真实闲鱼挂机链路与本地 Mock 演示链路统一到同一套 Agent 决策核心，降低调试和演示对平台 Cookie 的依赖。
 - 基于黄金交易场景构建离线 Agent eval gate，检查 intent、routed agent、guardrails、RAG grounding、price decision 和 memory consistency，避免只用最终自然语言回复判断质量。
 
 ## GitHub 项目简介
 
-Falses Goofish GuardAgent is a local-first AI customer-service and bargain-guard agent for Xianyu / Goofish. It combines deterministic pricing guardrails, SQLite conversation memory, lightweight product-fact retrieval, FastAPI service contracts, JSONL traces, and OpenAI-compatible LLM responses to make second-hand trading automation more controllable, explainable, testable, and product-ready.
+Falses Goofish GuardAgent is a local-first AI customer-service and bargain-guard platform for Xianyu / Goofish. It combines deterministic pricing guardrails, a durable reply Outbox, an auditable chat-event stream, a realtime seller inbox, SQLite conversation memory, FastAPI/SSE contracts, JSONL traces, and OpenAI-compatible LLM responses to make second-hand trading automation more controllable, explainable, testable, and product-ready.

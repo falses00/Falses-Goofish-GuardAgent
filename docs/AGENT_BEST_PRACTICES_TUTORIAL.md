@@ -127,6 +127,31 @@ flowchart LR
 
 这里仍不宣称绝对撤回：接管库、会话库和 Outbox 是独立事务，最后一次 SQLite 检查和远端 WebSocket 发送之间也存在极窄窗口，平台没有提供同一事务内的撤回能力。面试时主动说明这个边界，比声称“完全自动且绝不误发”更符合生产 Agent 的设计实践。
 
+## Lesson 1.2: Agent 记忆不是客服事实库
+
+短期记忆的目标是控制模型上下文长度，客服时间线的目标是审计真实发生过什么。把两者共用一张表，会让被 `max_history` 裁剪的消息从运营界面消失，也无法表达发送中、失败、接管取消等执行状态。
+
+本项目因此拆出两条链：
+
+```mermaid
+flowchart LR
+    A["平台原始消息"] --> B["ChatEventStore 事实流"]
+    A --> C["消息聚合"]
+    C --> D["Agent 决策"]
+    D --> E["Reply Outbox"]
+    E --> B
+    D --> F["Context memory"]
+    B --> G["SellerInbox read model"]
+    G --> H["HTTP + SSE + 三栏控制台"]
+```
+
+- `core/chat_event_store.py`：平台消息按 `source_message_id` 幂等写入；Outbox 状态按 dedupe key 更新同一个回复事件。
+- `core/seller_inbox.py`：将聊天事件、旧 Outbox 记录和人工接管聚合为会话队列与详情。
+- `api/app.py`：提供快照、单会话详情和 Bearer 鉴权 SSE；连接断开时前端轮询恢复。
+- `tests/test_chat_event_store.py`、`tests/test_seller_inbox.py`：验证重复事件、失败、无需回复、接管、筛选和 legacy 数据回退。
+
+面试讲法：我没有直接把 LLM memory 暴露成客服聊天记录，而是设计独立事件事实流和投影视图。这样模型上下文可以按成本裁剪，运营审计仍保留完整语义；执行状态变化更新同一事件，避免 UI 产生重复消息。
+
 ## Lesson 2: 规则中心先于自动执行
 
 如果目标是“自动客服到自动发货”，最危险的做法是让 LLM 自己记住所有商品规则，然后根据聊天内容直接决定发货。原因很直接：

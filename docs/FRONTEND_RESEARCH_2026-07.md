@@ -9,7 +9,7 @@ The old console was replaced instead of reskinned. The new direction is a data-d
 - **Decision database**: a searchable, status-aware list-detail view for routing, guardrails, pricing, knowledge evidence, memory, model state, and latency.
 - **Runtime health**: verified snapshot fields, a recovery playbook, and raw evidence behind progressive disclosure.
 
-The shell uses a persistent dark sidebar, compact global status bar, global search, four KPI cards, focused operational panels, and a responsive mobile drawer. URL hashes (`#dashboard`, `#workbench`, `#traces`, `#runtime`) preserve direct navigation. No remote font, CDN, framework, or runtime UI dependency was added, so the existing strict Content Security Policy remains intact.
+The shell uses a persistent dark sidebar, compact global status bar, global search, focused operational panels, and a responsive mobile drawer. The 2026-07-29 follow-up makes `#inbox` the default working route and adds queue / thread / context navigation; the earlier dashboard remains a secondary overview. URL hashes preserve direct navigation. No remote font, CDN, framework, or runtime UI dependency was added, so the existing strict Content Security Policy remains intact. The runnable-project evidence and realtime interaction decisions are documented in [`REALTIME_INBOX_RESEARCH_2026-07.md`](REALTIME_INBOX_RESEARCH_2026-07.md).
 
 ## Reference Project Review
 

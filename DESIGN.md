@@ -36,16 +36,17 @@ spacing:
 
 **North star: Seller Agent Operations.**
 
-The first screen is the working product, not a landing page. It should let an operator answer four questions within seconds: Is the Worker usable? What did the Agent decide? Did a guardrail intervene? What should I do next?
+The first screen is the working product, not a landing page. It should let an operator answer five questions within seconds: Which buyer needs attention? What was said? Did delivery succeed? Did a guardrail intervene? Should I take over?
 
 The interface combines the application shell and live monitoring structure of `ai-goofish-monitor` with Notion's database list-detail model. It stays specific to reply automation: no scraping metrics, fake revenue charts, decorative AI imagery, or copied component code.
 
 ## Information Architecture
 
-1. **Operations dashboard** is the default view. It summarizes real health, decision volume, guardrails, intent mix, recent decisions, activity, and current risk.
-2. **Reply dry-run** is the main creation flow. It keeps safety guarantees close to the form and inspects the generated decision beside it.
-3. **Decision database** is the audit surface. Search, intent, and safety status filter one collection while the selected Trace stays readable.
-4. **Runtime health** separates evidence from recovery guidance.
+1. **Realtime seller inbox** is the default view. It combines an attention queue, message timeline, and conversation evidence panel without inventing unread or revenue data.
+2. **Operations dashboard** summarizes real health, decision volume, guardrails, intent mix, recent decisions, activity, and current risk.
+3. **Reply dry-run** keeps safety guarantees close to the form and inspects the generated decision beside it.
+4. **Decision database** is the audit surface. Search, intent, and safety status filter one collection while the selected Trace stays readable.
+5. **Runtime health** separates evidence from recovery guidance.
 
 Desktop uses a 238px persistent sidebar and a compact sticky top bar. Screens at 960px and below use a modal drawer while preserving the same destinations and URL hashes.
 
@@ -60,6 +61,14 @@ Desktop uses a 238px persistent sidebar and a compact sticky top bar. Screens at
 - **Typography:** system UI fonts only. Chinese text, metrics, and controls must remain stable without a network request.
 
 ## Component Rules
+
+### Realtime Inbox
+
+- Desktop uses a three-column queue / thread / context layout; 1120px and below switches to explicit Queue / Thread / Context tabs instead of squeezing or stacking three long panels.
+- Queue order follows persisted event activity. Status labels distinguish takeover, failed, pending, review, and handled states without pretending to know platform unread counts.
+- The message timeline displays buyer, seller, and Agent roles plus actual Outbox delivery state. New snapshots preserve the selected conversation and only auto-scroll when the operator is already near the bottom.
+- The browser consumes an authenticated same-origin SSE stream. A broken stream visibly falls back to polling and periodically retries the stream.
+- Human takeover is available in the conversation header. Browser-originated Xianyu sends remain unavailable until a durable Worker command queue exists.
 
 ### Global Shell
 
@@ -98,7 +107,7 @@ Desktop uses a 238px persistent sidebar and a compact sticky top bar. Screens at
 - Keyboard focus remains visible on controls; programmatically focused headings retain semantics without a decorative outline.
 - A skip link, semantic heading order, `aria-live` feedback, dialog semantics, and reduced-motion fallback are mandatory.
 - Text wraps before it shrinks. Tables scroll inside their own container; the page itself must not overflow horizontally.
-- Verify at 390x844, 1024x768, and 1440x900 in both themes where relevant.
+- Verify at 390x844, 1024x768, and 1440x900 in both themes where relevant. The page width must equal the viewport width at every target.
 
 ## Human Takeover Workspace
 

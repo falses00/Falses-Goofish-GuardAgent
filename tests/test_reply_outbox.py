@@ -159,6 +159,22 @@ def test_reply_outbox_round_trips_memory_commit_payload(tmp_path):
     assert reopened.trace == {"price_decision": {"calculated_price": 99}}
 
 
+def test_reply_outbox_enables_wal_and_busy_timeout(tmp_path, monkeypatch):
+    monkeypatch.setenv("SQLITE_BUSY_TIMEOUT_MS", "4321")
+    outbox = ReplyOutbox(db_path=str(tmp_path / "reply_outbox.db"))
+
+    conn = sqlite3.connect(outbox.db_path)
+    journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    conn.close()
+
+    managed = outbox._connect()
+    busy_timeout = managed.execute("PRAGMA busy_timeout").fetchone()[0]
+    managed.close()
+
+    assert journal_mode == "wal"
+    assert busy_timeout == 4321
+
+
 def test_reply_outbox_migrates_legacy_schema(tmp_path):
     db_path = str(tmp_path / "legacy_reply_outbox.db")
     conn = sqlite3.connect(db_path)

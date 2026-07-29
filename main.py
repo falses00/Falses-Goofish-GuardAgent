@@ -16,6 +16,7 @@ import random
 from utils.xianyu_utils import generate_mid, generate_uuid, trans_cookies, generate_device_id, decrypt
 from XianyuAgent import XianyuReplyBot
 from context_manager import ChatContextManager
+from core.chat_event_store import ChatEventStore
 from core.message_aggregation import MessageAggregator
 from core.manual_takeover import ManualTakeoverStore
 from core.model_provider import has_model_api_key
@@ -36,6 +37,7 @@ class XianyuLive:
         reply_send_dry_run=None,
         runtime_status_store=None,
         manual_takeover_store=None,
+        chat_event_store=None,
     ):
         self.xianyu = xianyu_api or XianyuApis()
         self.base_url = 'wss://wss-goofish.dingtalk.com/'
@@ -97,6 +99,13 @@ class XianyuLive:
         )
         self.message_flush_tasks = {}
         self.reply_outbox = reply_outbox or ReplyOutbox()
+        if chat_event_store is not None:
+            self.chat_events = chat_event_store
+        elif reply_outbox is not None:
+            event_path = os.path.join(os.path.dirname(self.reply_outbox.db_path), "chat_events.db")
+            self.chat_events = ChatEventStore(event_path)
+        else:
+            self.chat_events = ChatEventStore()
         if reply_send_dry_run is None:
             reply_send_dry_run = os.getenv("REPLY_SEND_DRY_RUN", "false").lower() in {"1", "true", "yes", "on"}
         self.reply_send_dry_run = bool(reply_send_dry_run)
@@ -463,10 +472,20 @@ class XianyuLive:
         send_user_name="买家",
         aggregation_count=1,
         source_message_id=None,
+        record_inbound=True,
     ):
         source_message_id = source_message_id or ReplyOutbox.build_source_message_id(
             chat_id, item_id, send_user_id, send_message
         )
+        if record_inbound:
+            self.chat_events.record_inbound(
+                chat_id,
+                item_id,
+                send_user_id,
+                send_user_name,
+                send_message,
+                source_message_id,
+            )
         dedupe_key = ReplyOutbox.build_dedupe_key(chat_id, item_id, send_user_id, source_message_id)
         if self.is_manual_mode(chat_id):
             self._suppress_for_manual_takeover(
@@ -481,6 +500,7 @@ class XianyuLive:
 
         existing_record = self.reply_outbox.get(dedupe_key)
         if existing_record:
+            self._sync_outbox_event(existing_record)
             if existing_record.status in {"sent", "skipped"}:
                 self._commit_outbox_memory(existing_record)
                 logger.info(
@@ -556,6 +576,7 @@ class XianyuLive:
                 intent=bot_intent,
             )
             no_reply_record = self.reply_outbox.mark_skipped(no_reply_record.dedupe_key, "no_reply")
+            self._sync_outbox_event(no_reply_record)
             self._commit_outbox_memory(no_reply_record)
             return
 
@@ -570,7 +591,18 @@ class XianyuLive:
             user_text=send_message,
             intent=bot_intent,
         )
+        self._sync_outbox_event(outbox_record)
         await self._deliver_outbox_record(websocket, outbox_record)
+
+    def _sync_outbox_event(self, record):
+        try:
+            return self.chat_events.sync_outbox(record)
+        except Exception as exc:
+            logger.warning(
+                f"实时会话事件同步失败: chat_id={record.chat_id}, "
+                f"outbox_id={record.id}, error={type(exc).__name__}"
+            )
+            return None
 
     def _commit_outbox_memory(self, record):
         if record.status not in {"sent", "skipped"} or not record.user_text:
@@ -615,6 +647,7 @@ class XianyuLive:
         if existing_record:
             if existing_record.status not in {"sent", "skipped"}:
                 existing_record = self.reply_outbox.mark_skipped(dedupe_key, "manual_takeover")
+            self._sync_outbox_event(existing_record)
             self._commit_outbox_memory(existing_record)
             logger.info(
                 f"会话 {chat_id} 已人工接管，终止自动回复: "
@@ -634,6 +667,7 @@ class XianyuLive:
         )
         if record.status not in {"sent", "skipped"}:
             record = self.reply_outbox.mark_skipped(record.dedupe_key, "manual_takeover")
+        self._sync_outbox_event(record)
         self._commit_outbox_memory(record)
         logger.info(f"会话 {chat_id} 处于人工接管模式，已记录消息并禁止自动回复")
 
@@ -641,6 +675,7 @@ class XianyuLive:
         if self.is_manual_mode(outbox_record.chat_id):
             if outbox_record.status not in {"sent", "skipped"}:
                 outbox_record = self.reply_outbox.mark_skipped(outbox_record.dedupe_key, "manual_takeover")
+            self._sync_outbox_event(outbox_record)
             self._commit_outbox_memory(outbox_record)
             logger.info(f"会话 {outbox_record.chat_id} 已人工接管，Outbox 不再领取发送")
             return
@@ -650,12 +685,15 @@ class XianyuLive:
             stale_after_seconds=self.reply_send_claim_timeout_seconds,
         )
         if not claim.claimed:
+            self._sync_outbox_event(claim.record)
             self._commit_outbox_memory(claim.record)
             logger.info(
                 f"回复发送跳过: chat_id={claim.record.chat_id}, item_id={claim.record.item_id}, "
                 f"reason={claim.reason}, outbox_status={claim.record.status}"
             )
             return
+
+        self._sync_outbox_event(claim.record)
 
         reply_text = claim.record.reply_text
 
@@ -670,12 +708,14 @@ class XianyuLive:
         # Re-check immediately before the only network side effect.
         if self.is_manual_mode(claim.record.chat_id):
             skipped_record = self.reply_outbox.mark_skipped(claim.record.dedupe_key, "manual_takeover")
+            self._sync_outbox_event(skipped_record)
             self._commit_outbox_memory(skipped_record)
             logger.info(f"会话 {claim.record.chat_id} 在发送前被人工接管，已取消回复")
             return
 
         if self.reply_send_dry_run:
             skipped_record = self.reply_outbox.mark_skipped(claim.record.dedupe_key, "dry_run")
+            self._sync_outbox_event(skipped_record)
             self._commit_outbox_memory(skipped_record)
             logger.info(
                 f"REPLY_SEND_DRY_RUN=true，仅记录不真实发送: "
@@ -686,6 +726,7 @@ class XianyuLive:
         try:
             await self.send_msg(websocket, claim.record.chat_id, claim.record.user_id, reply_text)
             sent_record = self.reply_outbox.mark_sent(claim.record.dedupe_key)
+            self._sync_outbox_event(sent_record)
             self._commit_outbox_memory(sent_record)
             logger.info(
                 f"回复发送成功: chat_id={claim.record.chat_id}, item_id={claim.record.item_id}, "
@@ -693,6 +734,7 @@ class XianyuLive:
             )
         except Exception as exc:
             failed_record = self.reply_outbox.mark_failed(claim.record.dedupe_key, str(exc))
+            self._sync_outbox_event(failed_record)
             self._commit_outbox_memory(failed_record)
             logger.error(
                 f"回复发送失败: chat_id={claim.record.chat_id}, item_id={claim.record.item_id}, "
@@ -722,6 +764,7 @@ class XianyuLive:
                     batch.combined_text(),
                     event_time_ms=batch.last_seen_ms,
                 ),
+                record_inbound=False,
             )
         except asyncio.CancelledError:
             raise
@@ -755,6 +798,7 @@ class XianyuLive:
                     send_message,
                     event_time_ms=create_time,
                 ),
+                record_inbound=False,
             )
             return
 
@@ -883,6 +927,14 @@ class XianyuLive:
                 logger.warning("无法获取商品ID")
                 return
 
+            source_message_id = ReplyOutbox.build_source_message_id(
+                chat_id,
+                item_id,
+                send_user_id,
+                send_message,
+                event_time_ms=create_time,
+            )
+
             # 检查是否为卖家（自己）发送的控制命令
             if send_user_id == self.myid:
                 logger.debug("检测到卖家消息，检查是否为控制命令")
@@ -897,12 +949,39 @@ class XianyuLive:
                     return
 
                 # 记录卖家人工回复
+                self.chat_events.record_seller(
+                    chat_id,
+                    item_id,
+                    self.myid,
+                    send_message,
+                    source_message_id,
+                    event_time_ms=create_time,
+                )
                 self.context_manager.add_message_by_chat(chat_id, self.myid, item_id, "assistant", send_message)
                 logger.info(f"卖家人工回复 (会话: {chat_id}, 商品: {item_id}): {send_message}")
                 return
 
             logger.info(f"用户: {send_user_name} (ID: {send_user_id}), 商品: {item_id}, 会话: {chat_id}, 消息: {send_message}")
 
+
+            # 检查是否为带中括号的系统消息
+            if self.is_bracket_system_message(send_message):
+                logger.info(f"检测到系统消息：'{send_message}'，跳过自动回复")
+                return
+            if self.is_system_message(message):
+                logger.debug("系统消息，跳过处理")
+                return
+
+            # Persist the platform event before aggregation or Agent processing.
+            self.chat_events.record_inbound(
+                chat_id,
+                item_id,
+                send_user_id,
+                send_user_name,
+                send_message,
+                source_message_id,
+                event_time_ms=create_time,
+            )
 
             # 如果当前会话处于人工接管模式，不进行自动回复
             if self.is_manual_mode(chat_id):
@@ -914,21 +993,9 @@ class XianyuLive:
                     item_id,
                     send_message,
                     send_user_name=send_user_name,
-                    source_message_id=ReplyOutbox.build_source_message_id(
-                        chat_id,
-                        item_id,
-                        send_user_id,
-                        send_message,
-                        event_time_ms=create_time,
-                    ),
+                    source_message_id=source_message_id,
+                    record_inbound=False,
                 )
-                return
-            # 检查是否为带中括号的系统消息
-            if self.is_bracket_system_message(send_message):
-                logger.info(f"检测到系统消息：'{send_message}'，跳过自动回复")
-                return
-            if self.is_system_message(message):
-                logger.debug("系统消息，跳过处理")
                 return
             await self._enqueue_or_process_buyer_message(
                 websocket,

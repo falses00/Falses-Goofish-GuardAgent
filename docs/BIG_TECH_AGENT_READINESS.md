@@ -48,6 +48,8 @@ The project already had routing, SQLite memory, trace logging, smoke mode, deter
 - `tests/test_product_rules.py`: rule-center tests for product matching, unpaid delivery blocking, digital auto-delivery decisions, physical manual review, and forbidden-promise interception.
 - `tests/test_human_style.py`: adversarial tone test proving robotic LLM output is rewritten before being returned.
 - `tests/test_reply_outbox.py`: execution tests for duplicate-send blocking and retry after failure.
+- `tests/test_chat_event_store.py`: idempotent platform events, Outbox lifecycle projection, seller messages, and silent terminal decisions.
+- `tests/test_seller_inbox.py`: conversation state aggregation, search/filter composition, takeover projection, and legacy Outbox fallback.
 - `tests/test_api.py`: API tests for health, routing, price guardrails, trace lookup, memory persistence, batched input, concurrent trace isolation, completed-response replay, request conflicts, and invalid input.
 - `tests/test_api_request_replay.py`: state-machine tests for completed replay, payload conflicts, in-progress blocking, stale-owner fencing, lease reclaim, and failed-request recovery.
 - `tests/test_agent_runtime.py`: extension registration, prompt-reload persistence, model-outage fallback, cross-product fact isolation, and readiness diagnostics.

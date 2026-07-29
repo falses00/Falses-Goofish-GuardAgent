@@ -25,7 +25,9 @@ class ReplyOutboxRecord:
     intent: Optional[str] = None
     trace: Dict[str, Any] = field(default_factory=dict)
     last_error: Optional[str] = None
+    created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    sent_at: Optional[str] = None
     created: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
@@ -58,15 +60,26 @@ class ReplyOutbox:
 
     def __init__(self, db_path: Optional[str] = None):
         self.db_path = db_path or os.getenv("REPLY_OUTBOX_DB_PATH", "data/reply_outbox.db")
+        try:
+            self.busy_timeout_ms = max(1000, int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "30000")))
+        except ValueError:
+            self.busy_timeout_ms = 30000
         self._init_db()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=self.busy_timeout_ms / 1000)
+        conn.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        return conn
 
     def _init_db(self) -> None:
         db_dir = os.path.dirname(self.db_path)
         if db_dir and not os.path.exists(db_dir):
             os.makedirs(db_dir)
 
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
+        cursor.execute("PRAGMA journal_mode = WAL")
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS reply_outbox (
@@ -131,7 +144,7 @@ class ReplyOutbox:
         trace_json = json.dumps(trace or {}, ensure_ascii=False)
         now = datetime.now().isoformat()
 
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
         try:
             cursor.execute(
@@ -182,7 +195,7 @@ class ReplyOutbox:
     def claim_for_send(self, dedupe_key: str, stale_after_seconds: int = 300) -> ReplySendClaim:
         now = datetime.now()
         stale_before = (now - timedelta(seconds=max(0, stale_after_seconds))).isoformat()
-        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn = self._connect()
         cursor = conn.cursor()
         try:
             # Serialize the read-and-claim transition so concurrent workers cannot
@@ -242,7 +255,7 @@ class ReplyOutbox:
         sent: bool = False,
         allowed_statuses: Optional[set] = None,
     ) -> ReplyOutboxRecord:
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
         try:
             status_filter = ""
@@ -276,7 +289,7 @@ class ReplyOutbox:
             conn.close()
 
     def get(self, dedupe_key: str) -> Optional[ReplyOutboxRecord]:
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
         try:
             return self._fetch_by_key(cursor, dedupe_key, required=False)
@@ -284,11 +297,35 @@ class ReplyOutbox:
             conn.close()
 
     def count_by_status(self, status: str) -> int:
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.cursor()
         try:
             cursor.execute("SELECT COUNT(*) FROM reply_outbox WHERE status = ?", (status,))
             return int(cursor.fetchone()[0])
+        finally:
+            conn.close()
+
+    def list_recent(self, limit: int = 500, chat_id: Optional[str] = None) -> list[ReplyOutboxRecord]:
+        """Return durable reply events newest first for the operator inbox."""
+        safe_limit = min(2000, max(1, int(limit)))
+        conn = self._connect()
+        cursor = conn.cursor()
+        try:
+            where = "WHERE chat_id = ?" if chat_id else ""
+            params = [chat_id, safe_limit] if chat_id else [safe_limit]
+            cursor.execute(
+                f"""
+                SELECT id, dedupe_key, chat_id, item_id, user_id, source_message_id,
+                       reply_text, user_text, intent, trace_json, status, attempt_count,
+                       last_error, created_at, updated_at, sent_at
+                FROM reply_outbox
+                {where}
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                params,
+            )
+            return [self._record_from_row(row) for row in cursor.fetchall()]
         finally:
             conn.close()
 
@@ -298,7 +335,7 @@ class ReplyOutbox:
             """
             SELECT id, dedupe_key, chat_id, item_id, user_id, source_message_id,
                    reply_text, user_text, intent, trace_json, status, attempt_count,
-                   last_error, updated_at
+                   last_error, created_at, updated_at, sent_at
             FROM reply_outbox
             WHERE dedupe_key = ?
             """,
@@ -309,6 +346,10 @@ class ReplyOutbox:
             if required:
                 raise KeyError(f"reply outbox record not found: {dedupe_key}")
             return None
+        return ReplyOutbox._record_from_row(row)
+
+    @staticmethod
+    def _record_from_row(row) -> ReplyOutboxRecord:
         trace = {}
         try:
             trace = json.loads(row[9] or "{}")
@@ -328,5 +369,7 @@ class ReplyOutbox:
             status=row[10],
             attempt_count=row[11],
             last_error=row[12],
-            updated_at=row[13],
+            created_at=row[13],
+            updated_at=row[14],
+            sent_at=row[15],
         )

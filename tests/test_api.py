@@ -96,6 +96,49 @@ def test_takeover_api_is_protected_and_validates_ttl(tmp_path):
     assert blank_chat_id.status_code == 422
 
 
+def test_inbox_api_lists_filters_and_opens_real_conversation(tmp_path):
+    client = build_client(tmp_path)
+    events = client.app.state.chat_events
+    events.record_inbound(
+        "chat_live_1", "item_7", "buyer_7", "阿青", "今天能发吗", "source_live_1", 1720000000000
+    )
+
+    listed = client.get("/api/inbox", params={"query": "阿青", "state": "pending"})
+    detail = client.get("/api/inbox/chat_live_1")
+    missing = client.get("/api/inbox/missing_chat")
+    invalid_state = client.get("/api/inbox", params={"state": "unknown"})
+
+    assert listed.status_code == 200
+    assert listed.json()["counts"]["pending"] == 1
+    assert listed.json()["items"][0]["chat_id"] == "chat_live_1"
+    assert detail.status_code == 200
+    assert detail.json()["messages"][0]["content"] == "今天能发吗"
+    assert missing.status_code == 404
+    assert invalid_state.status_code == 422
+
+
+def test_inbox_and_stream_require_operator_token(tmp_path):
+    app = create_app(
+        offline_mode=True,
+        db_path=str(tmp_path / "api_chat_history.db"),
+        trace_path=str(tmp_path / "agent_traces.jsonl"),
+        request_replay_path=str(tmp_path / "api_request_replay.db"),
+        manual_takeover_path=str(tmp_path / "manual_takeovers.db"),
+        access_token="operator-secret",
+    )
+    client = TestClient(app)
+
+    assert client.get("/api/inbox").status_code == 401
+    assert client.get("/api/inbox/stream").status_code == 401
+    authorized = client.get(
+        "/api/inbox",
+        headers={"Authorization": "Bearer operator-secret"},
+    )
+    public_overview = client.get("/api/overview")
+    assert authorized.status_code == 200
+    assert "inbox" not in public_overview.json()
+
+
 def test_reply_routes_tech_question_and_persists_memory(tmp_path):
     client = build_client(tmp_path)
 
@@ -370,6 +413,7 @@ def test_operator_console_and_static_assets_are_served_with_security_headers(tmp
 
     assert page.status_code == 200
     assert "Falses Goofish GuardAgent" in page.text
+    assert 'data-view="inbox"' in page.text
     assert 'data-view="dashboard"' in page.text
     assert 'data-view="workbench"' in page.text
     assert 'data-view="takeovers"' in page.text
@@ -384,8 +428,12 @@ def test_operator_console_and_static_assets_are_served_with_security_headers(tmp
     assert 'id="takeoverForm"' in page.text
     assert 'id="takeoverList"' in page.text
     assert 'id="takeoverEvents"' in page.text
-    assert "/static/styles.css?v=20260720.1" in page.text
-    assert "/static/app.js?v=20260720.1" in page.text
+    assert 'id="inboxLayout"' in page.text
+    assert 'id="inboxList"' in page.text
+    assert 'id="messageTimeline"' in page.text
+    assert 'id="inboxContextContent"' in page.text
+    assert "/static/styles.css?v=20260729.1" in page.text
+    assert "/static/app.js?v=20260729.1" in page.text
     assert stylesheet.status_code == 200
     assert page.headers["x-content-type-options"] == "nosniff"
     assert "default-src 'self'" in page.headers["content-security-policy"]

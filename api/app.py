@@ -1,5 +1,6 @@
-import json
+import asyncio
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -10,17 +11,20 @@ from threading import RLock
 from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Path as ApiPath, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from core.api_request_replay import ApiRequestReplayStore, RequestReplayConflict
+from core.chat_event_store import ChatEventStore
 from core.evaluation import DeterministicLLMClient
 from core.message_aggregation import MessageBatch
 from core.manual_takeover import ManualTakeoverStore
 from core.model_provider import has_model_api_key
+from core.reply_outbox import ReplyOutbox
 from core.runtime_status import build_runtime_status_report
+from core.seller_inbox import SellerInbox
 from core.trace_store import JsonlTraceStore
 from XianyuAgent import XianyuReplyBot
 
@@ -177,11 +181,13 @@ def create_app(
     access_token: Optional[str] = None,
     runtime_status_path: Optional[str] = None,
     manual_takeover_path: Optional[str] = None,
+    reply_outbox_path: Optional[str] = None,
+    chat_event_path: Optional[str] = None,
 ) -> FastAPI:
     docs_enabled = _env_flag("API_DOCS_ENABLED", True)
     app = FastAPI(
         title="Falses Goofish GuardAgent API",
-        version="0.5.0",
+        version="0.6.0",
         description="Service API for local-first Xianyu / Goofish AI customer-service agent.",
         docs_url="/docs" if docs_enabled else None,
         redoc_url="/redoc" if docs_enabled else None,
@@ -198,6 +204,20 @@ def create_app(
     )
     app.state.request_replays = ApiRequestReplayStore(request_replay_path)
     app.state.manual_takeovers = ManualTakeoverStore(manual_takeover_path)
+    state_dir = Path(db_path).parent if db_path else None
+    resolved_outbox_path = reply_outbox_path or (
+        str(state_dir / "reply_outbox.db") if state_dir else None
+    )
+    resolved_chat_event_path = chat_event_path or (
+        str(state_dir / "chat_events.db") if state_dir else None
+    )
+    app.state.reply_outbox = ReplyOutbox(resolved_outbox_path)
+    app.state.chat_events = ChatEventStore(resolved_chat_event_path)
+    app.state.seller_inbox = SellerInbox(
+        app.state.chat_events,
+        app.state.reply_outbox,
+        app.state.manual_takeovers,
+    )
     # XianyuReplyBot exposes mutable last_intent/last_trace for legacy callers.
     # Keep one explicit service boundary until the core returns immutable decisions.
     app.state.decision_lock = RLock()
@@ -275,6 +295,8 @@ def create_app(
             app.state.trace_store.path.parent,
             Path(app.state.request_replays.path).parent,
             Path(app.state.manual_takeovers.path).parent,
+            Path(app.state.reply_outbox.db_path).parent,
+            Path(app.state.chat_events.path).parent,
         ]
         storage_checks = []
         for storage_path in storage_paths:
@@ -358,6 +380,61 @@ def create_app(
                 "active_count": active_takeover_count,
             },
         }
+
+    @app.get("/api/inbox")
+    def inbox(
+        limit: int = Query(100, ge=1, le=200),
+        query: Optional[str] = Query(None, max_length=200),
+        state: Optional[str] = Query(
+            None,
+            pattern=r"^(takeover|failed|pending|review|handled)$",
+        ),
+        _: None = Depends(require_access),
+    ) -> Dict[str, Any]:
+        return app.state.seller_inbox.snapshot(limit=limit, query=query, state=state)
+
+    @app.get("/api/inbox/stream")
+    async def inbox_stream(
+        request: Request,
+        _: None = Depends(require_access),
+    ) -> StreamingResponse:
+        async def event_stream():
+            last_version = None
+            heartbeat_ticks = 0
+            while not await request.is_disconnected():
+                snapshot = await asyncio.to_thread(app.state.seller_inbox.snapshot, 200)
+                if snapshot["version"] != last_version:
+                    last_version = snapshot["version"]
+                    payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+                    yield f"event: snapshot\ndata: {payload}\n\n"
+                    heartbeat_ticks = 0
+                else:
+                    heartbeat_ticks += 1
+                    if heartbeat_ticks >= 15:
+                        yield ": heartbeat\n\n"
+                        heartbeat_ticks = 0
+                await asyncio.sleep(1)
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.get("/api/inbox/{chat_id}")
+    def inbox_conversation(
+        chat_id: str = ApiPath(..., min_length=1, max_length=128, pattern=r".*\S.*"),
+        limit: int = Query(200, ge=1, le=500),
+        _: None = Depends(require_access),
+    ) -> Dict[str, Any]:
+        conversation = app.state.seller_inbox.conversation(chat_id, limit=limit)
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="conversation_not_found")
+        return conversation
 
     @app.post("/api/reply", response_model=ReplyResponse)
     def reply(

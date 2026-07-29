@@ -4,6 +4,11 @@
   const TOKEN_KEY = "xianyu-agent-access-token";
   const THEME_KEY = "guardagent-console-theme";
   const viewMetadata = {
+    inbox: {
+      title: "实时会话",
+      eyebrow: "Live seller inbox",
+      description: "监控买家消息、Agent 回复、发送状态与人工接管。",
+    },
     dashboard: {
       title: "运营总览",
       eyebrow: "Agent operations",
@@ -98,13 +103,24 @@
     traces: [],
     takeovers: [],
     takeoverEvents: [],
+    inboxItems: [],
+    inboxCounts: { total: 0, attention: 0, takeover: 0, failed: 0, pending: 0 },
+    inboxVersion: "",
+    selectedChatId: null,
+    selectedConversation: null,
+    inboxStreamAbort: null,
+    inboxStreamPaused: false,
+    inboxReconnectTimer: null,
+    inboxPollTimer: null,
+    inboxFilterTimer: null,
+    inboxErrorIsAuth: false,
     visibleTraces: [],
     selectedTraceTimestamp: null,
     latestReply: null,
     retryAfterToken: null,
     traceErrorIsAuth: false,
-    activeView: "dashboard",
-    viewScrollPositions: { dashboard: 0, workbench: 0, takeovers: 0, traces: 0, runtime: 0 },
+    activeView: "inbox",
+    viewScrollPositions: { inbox: 0, dashboard: 0, workbench: 0, takeovers: 0, traces: 0, runtime: 0 },
   };
 
   const elements = {};
@@ -130,12 +146,14 @@
     updateTokenIndicator();
     updateMessageCount();
     generateRequestId();
-    loadDashboard();
+    loadDashboard().finally(() => {
+      loadInbox(false).catch(() => {}).finally(() => connectInboxStream());
+    });
   }
 
   function cacheElements() {
     const ids = [
-      "pageEyebrow", "pageTitle", "pageDescription", "sidebarOverviewState", "sidebarTraceCount", "sidebarTakeoverCount", "sidebarRuntimeState",
+      "pageEyebrow", "pageTitle", "pageDescription", "sidebarOverviewState", "sidebarInboxCount", "sidebarTraceCount", "sidebarTakeoverCount", "sidebarRuntimeState",
       "apiStatus", "workerStatus", "modeStatus", "refreshAllButton", "openTokenButton",
       "themeToggleButton", "globalSearch", "mobileNavButton", "closeSidebarButton", "mobileNavBackdrop",
       "appSidebar", "appWorkspace",
@@ -164,6 +182,13 @@
       "takeoverSubmitButton", "takeoverFeedback", "takeoverCount", "refreshTakeoversButton",
       "takeoverList", "takeoverEmpty", "takeoverError", "takeoverErrorTitle", "takeoverErrorMessage",
       "takeoverErrorAction", "takeoverEvents",
+      "inboxLayout", "inboxStreamStatus", "inboxStreamToggle", "inboxSearch", "inboxStateFilter",
+      "inboxAttentionCount", "inboxTotalCount", "inboxList", "inboxEmpty", "inboxError",
+      "inboxErrorTitle", "inboxErrorMessage", "inboxErrorAction", "conversationEmpty",
+      "conversationContent", "conversationAvatar", "conversationTitle", "conversationStateBadge",
+      "conversationSubtitle", "inboxTakeoverButton", "messageTimeline", "inboxOpenTraceButton",
+      "inboxContextEmpty", "inboxContextContent", "inboxIdentityContext", "inboxDecisionContext",
+      "inboxGuardrailContext", "inboxDeliveryContext",
     ];
     ids.forEach((id) => {
       elements[id] = document.getElementById(id);
@@ -184,11 +209,24 @@
     window.addEventListener("resize", handleViewportChange);
     document.addEventListener("keydown", handleGlobalShortcut);
     elements.globalSearch.addEventListener("keydown", handleGlobalSearch);
+    elements.inboxSearch.addEventListener("input", () => scheduleInboxFilterReload(250));
+    elements.inboxStateFilter.addEventListener("change", () => scheduleInboxFilterReload(0));
+    elements.inboxList.addEventListener("click", selectInboxConversationFromEvent);
+    elements.inboxStreamToggle.addEventListener("click", toggleInboxStream);
+    elements.inboxErrorAction.addEventListener("click", handleInboxErrorAction);
+    elements.inboxTakeoverButton.addEventListener("click", toggleSelectedTakeover);
+    elements.inboxOpenTraceButton.addEventListener("click", openSelectedConversationTrace);
+    document.querySelectorAll("[data-inbox-mobile-panel]").forEach((button) => {
+      button.addEventListener("click", () => setInboxMobilePanel(button.dataset.inboxMobilePanel));
+    });
     elements.themeToggleButton.addEventListener("click", toggleTheme);
     elements.mobileNavButton.addEventListener("click", openMobileNav);
     elements.closeSidebarButton.addEventListener("click", () => closeMobileNav());
     elements.mobileNavBackdrop.addEventListener("click", () => closeMobileNav());
-    elements.refreshAllButton.addEventListener("click", () => loadDashboard(true));
+    elements.refreshAllButton.addEventListener("click", () => {
+      loadDashboard(true);
+      loadInbox(false).catch(() => {});
+    });
     elements.refreshRuntimeButton.addEventListener("click", () => loadDashboard(true));
     elements.refreshTracesButton.addEventListener("click", () => loadTraces(true));
     elements.refreshTakeoversButton.addEventListener("click", () => loadTakeovers(true));
@@ -240,6 +278,7 @@
         loadTraces(true);
       }
     });
+    window.addEventListener("beforeunload", stopInboxStream);
   }
 
   function initializeTheme() {
@@ -351,20 +390,19 @@
       return;
     }
     event.preventDefault();
-    elements.traceSearch.value = elements.globalSearch.value.trim();
-    elements.traceIntentFilter.value = "";
-    elements.traceStatusFilter.value = "";
-    applyTraceFilters();
-    activateView("traces", { updateHash: true, focus: true });
+    elements.inboxSearch.value = elements.globalSearch.value.trim();
+    elements.inboxStateFilter.value = "";
+    scheduleInboxFilterReload(0);
+    activateView("inbox", { updateHash: true, focus: true });
   }
 
   function viewFromHash() {
     const candidate = window.location.hash.replace(/^#/, "");
-    return Object.prototype.hasOwnProperty.call(viewMetadata, candidate) ? candidate : "dashboard";
+    return Object.prototype.hasOwnProperty.call(viewMetadata, candidate) ? candidate : "inbox";
   }
 
   function activateView(view, options) {
-    const targetView = Object.prototype.hasOwnProperty.call(viewMetadata, view) ? view : "dashboard";
+    const targetView = Object.prototype.hasOwnProperty.call(viewMetadata, view) ? view : "inbox";
     const settings = { updateHash: false, focus: false, ...(options || {}) };
     const previousView = state.activeView;
     if (previousView !== targetView && Object.prototype.hasOwnProperty.call(viewMetadata, previousView)) {
@@ -391,6 +429,10 @@
     elements.openRuntimeButton.hidden = targetView === "runtime";
     document.title = `${metadata.title} | 闲鱼卖家 Agent 操作台`;
 
+    if (targetView === "inbox" && !state.inboxStreamPaused && !state.inboxStreamAbort) {
+      connectInboxStream();
+    }
+
     if (settings.updateHash && window.location.hash !== `#${targetView}`) {
       window.history.pushState(null, "", `#${targetView}`);
     }
@@ -406,6 +448,573 @@
         }
       });
     }
+  }
+
+  const inboxStateLabels = {
+    takeover: "人工接管",
+    failed: "发送失败",
+    pending: "等待处理",
+    review: "需要复核",
+    handled: "已处理",
+  };
+  const deliveryLabels = {
+    received: "已收到",
+    pending: "等待发送",
+    sending: "正在发送",
+    sent: "已发送",
+    failed: "发送失败",
+    simulated: "模拟发送",
+    cancelled_takeover: "接管取消",
+    no_reply: "无需回复",
+    skipped: "已跳过",
+  };
+
+  async function loadInbox(announce) {
+    elements.inboxList.setAttribute("aria-busy", "true");
+    elements.inboxError.hidden = true;
+    try {
+      const params = new URLSearchParams({ limit: "200" });
+      const query = elements.inboxSearch.value.trim();
+      const stateFilter = elements.inboxStateFilter.value;
+      if (query) {
+        params.set("query", query);
+      }
+      if (stateFilter) {
+        params.set("state", stateFilter);
+      }
+      const snapshot = await apiFetch(`/api/inbox?${params.toString()}`);
+      applyInboxSnapshot(snapshot, { refreshDetail: true });
+      if (announce) {
+        showNotice("实时会话已刷新", `当前监控 ${state.inboxCounts.total} 个会话。`, "ok", 2600);
+      }
+      return snapshot;
+    } catch (error) {
+      renderInboxError(error);
+      throw error;
+    } finally {
+      elements.inboxList.setAttribute("aria-busy", "false");
+    }
+  }
+
+  function applyInboxSnapshot(snapshot, options) {
+    const settings = { refreshDetail: false, fromStream: false, ...(options || {}) };
+    const previousVersion = state.inboxVersion;
+    const filterActive = Boolean(elements.inboxSearch.value.trim() || elements.inboxStateFilter.value);
+    if (!settings.fromStream || !filterActive) {
+      state.inboxItems = Array.isArray(snapshot.items) ? snapshot.items : [];
+    }
+    state.inboxCounts = snapshot.counts || { total: 0, attention: 0, takeover: 0, failed: 0, pending: 0 };
+    state.inboxVersion = snapshot.version || "";
+    elements.inboxAttentionCount.textContent = String(numberOrZero(state.inboxCounts.attention));
+    elements.inboxTotalCount.textContent = String(numberOrZero(state.inboxCounts.total));
+    elements.sidebarInboxCount.textContent = state.inboxCounts.attention
+      ? `${state.inboxCounts.attention} 待处理`
+      : `${state.inboxCounts.total} 个`;
+    elements.inboxError.hidden = true;
+    state.inboxErrorIsAuth = false;
+    if (settings.fromStream && filterActive) {
+      scheduleInboxFilterReload(0);
+      return;
+    }
+    renderInboxList();
+    if (
+      state.selectedChatId
+      && (settings.refreshDetail || (previousVersion && previousVersion !== state.inboxVersion))
+    ) {
+      loadInboxConversation(state.selectedChatId, { preserveScroll: true }).catch(() => {});
+    }
+  }
+
+  function scheduleInboxFilterReload(delay) {
+    window.clearTimeout(state.inboxFilterTimer);
+    state.inboxFilterTimer = window.setTimeout(() => {
+      state.inboxFilterTimer = null;
+      loadInbox(false).catch(() => {});
+    }, Math.max(0, Number(delay) || 0));
+  }
+
+  function filteredInboxItems() {
+    const query = " ".concat(elements.inboxSearch.value || "").trim().toLowerCase();
+    const stateFilter = elements.inboxStateFilter.value;
+    return state.inboxItems.filter((item) => {
+      if (stateFilter && item.state !== stateFilter) {
+        return false;
+      }
+      if (!query) {
+        return true;
+      }
+      const haystack = [
+        item.buyer_name, item.chat_id, item.item_id, item.user_id,
+        item.last_message, item.intent, item.agent, ...(item.guardrails || []),
+      ].filter(Boolean).join(" ").toLowerCase();
+      return haystack.includes(query);
+    });
+  }
+
+  function renderInboxList() {
+    const visibleItems = filteredInboxItems();
+    elements.inboxList.replaceChildren();
+    elements.inboxEmpty.hidden = visibleItems.length > 0 || !elements.inboxError.hidden;
+
+    visibleItems.forEach((conversation) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "inbox-conversation-item";
+      button.dataset.chatId = conversation.chat_id;
+      button.dataset.state = conversation.state;
+      button.setAttribute("aria-pressed", String(conversation.chat_id === state.selectedChatId));
+      if (conversation.chat_id === state.selectedChatId) {
+        button.classList.add("is-selected");
+      }
+
+      const avatar = document.createElement("span");
+      avatar.className = "inbox-avatar";
+      avatar.textContent = (conversation.buyer_name || "买").trim().slice(0, 1) || "买";
+
+      const body = document.createElement("span");
+      body.className = "inbox-item-body";
+      const heading = document.createElement("span");
+      heading.className = "inbox-item-heading";
+      const name = document.createElement("strong");
+      name.textContent = conversation.buyer_name || "买家";
+      const time = document.createElement("time");
+      time.dateTime = conversation.last_activity_at || "";
+      time.textContent = formatRelativeTime(conversation.last_activity_at);
+      heading.append(name, time);
+
+      const preview = document.createElement("span");
+      preview.className = "inbox-message-preview";
+      const role = conversation.last_message_role === "buyer"
+        ? "买家"
+        : conversation.last_message_role === "seller"
+          ? "人工"
+          : conversation.last_message_role === "system" ? "系统" : "Agent";
+      preview.textContent = `${role}：${conversation.last_message || "暂无消息"}`;
+
+      const meta = document.createElement("span");
+      meta.className = "inbox-item-meta";
+      const badge = document.createElement("span");
+      badge.className = "inbox-state-badge";
+      badge.dataset.state = conversation.state;
+      badge.textContent = inboxStateLabels[conversation.state] || conversation.state;
+      const item = document.createElement("span");
+      item.textContent = conversation.item_id ? `商品 ${conversation.item_id}` : `会话 ${conversation.chat_id}`;
+      meta.append(badge, item);
+      body.append(heading, preview, meta);
+      button.append(avatar, body);
+      elements.inboxList.append(button);
+    });
+
+    const selectedIsVisible = visibleItems.some((item) => item.chat_id === state.selectedChatId);
+    if (!selectedIsVisible) {
+      if (visibleItems.length) {
+        selectInboxConversation(visibleItems[0].chat_id, { mobile: false });
+      } else {
+        clearInboxConversation();
+      }
+    }
+  }
+
+  function selectInboxConversationFromEvent(event) {
+    const button = event.target.closest("button[data-chat-id]");
+    if (button) {
+      selectInboxConversation(button.dataset.chatId, { mobile: true });
+    }
+  }
+
+  function selectInboxConversation(chatId, options) {
+    if (!chatId) {
+      return;
+    }
+    state.selectedChatId = chatId;
+    elements.inboxList.querySelectorAll("button[data-chat-id]").forEach((button) => {
+      const selected = button.dataset.chatId === chatId;
+      button.classList.toggle("is-selected", selected);
+      button.setAttribute("aria-pressed", String(selected));
+    });
+    if (!options || options.mobile !== false) {
+      setInboxMobilePanel("thread");
+    }
+    loadInboxConversation(chatId).catch(() => {});
+  }
+
+  async function loadInboxConversation(chatId, options) {
+    const settings = { preserveScroll: false, ...(options || {}) };
+    const wasNearBottom = elements.messageTimeline.scrollHeight - elements.messageTimeline.scrollTop
+      - elements.messageTimeline.clientHeight < 90;
+    elements.messageTimeline.setAttribute("aria-busy", "true");
+    try {
+      const detail = await apiFetch(`/api/inbox/${encodeURIComponent(chatId)}?limit=500`);
+      if (state.selectedChatId !== chatId) {
+        return;
+      }
+      state.selectedConversation = detail;
+      renderInboxConversation(detail);
+      if (!settings.preserveScroll || wasNearBottom) {
+        window.requestAnimationFrame(() => {
+          elements.messageTimeline.scrollTop = elements.messageTimeline.scrollHeight;
+        });
+      }
+    } catch (error) {
+      if (state.selectedChatId === chatId) {
+        showNotice("无法打开会话", describeGenericError(error), "error");
+      }
+      throw error;
+    } finally {
+      elements.messageTimeline.setAttribute("aria-busy", "false");
+    }
+  }
+
+  function renderInboxConversation(detail) {
+    const conversation = detail.conversation || {};
+    const messages = Array.isArray(detail.messages) ? detail.messages : [];
+    elements.conversationEmpty.hidden = true;
+    elements.conversationContent.hidden = false;
+    elements.inboxContextEmpty.hidden = true;
+    elements.inboxContextContent.hidden = false;
+    elements.inboxOpenTraceButton.disabled = false;
+    elements.conversationAvatar.textContent = (conversation.buyer_name || "买").trim().slice(0, 1) || "买";
+    elements.conversationTitle.textContent = conversation.buyer_name || "买家";
+    elements.conversationSubtitle.textContent = `会话 ${conversation.chat_id} · 商品 ${conversation.item_id || "未知"}`;
+    elements.conversationStateBadge.dataset.state = conversation.state;
+    elements.conversationStateBadge.textContent = inboxStateLabels[conversation.state] || conversation.state || "未知";
+    syncInboxTakeoverButton();
+
+    elements.messageTimeline.replaceChildren();
+    messages.forEach((message) => {
+      const row = document.createElement("article");
+      row.className = `message-row message-row-${message.role || "system"}`;
+      const bubble = document.createElement("div");
+      bubble.className = "message-bubble";
+      const sender = document.createElement("div");
+      sender.className = "message-sender";
+      const senderName = document.createElement("strong");
+      senderName.textContent = message.sender_name || (
+        message.role === "buyer" ? "买家" : message.role === "seller" ? "卖家人工" : "GuardAgent"
+      );
+      const timestamp = document.createElement("time");
+      timestamp.dateTime = message.timestamp || "";
+      timestamp.textContent = formatDateTime(message.timestamp);
+      sender.append(senderName, timestamp);
+      const content = document.createElement("p");
+      content.textContent = message.content || "";
+      const status = document.createElement("span");
+      status.className = "message-delivery";
+      status.dataset.status = message.delivery_status || "received";
+      status.textContent = deliveryLabels[message.delivery_status] || message.delivery_status || "已记录";
+      if (message.delivery_reason && message.delivery_status === "failed") {
+        status.title = message.delivery_reason;
+      }
+      bubble.append(sender, content, status);
+      row.append(bubble);
+      elements.messageTimeline.append(row);
+    });
+
+    renderInboxContext(detail);
+  }
+
+  function renderInboxContext(detail) {
+    const conversation = detail.conversation || {};
+    const decision = detail.decision || {};
+    const rules = decision.rules || {};
+    const price = decision.price_decision || {};
+    elements.inboxIdentityContext.replaceChildren();
+    appendContextRow(elements.inboxIdentityContext, "会话 ID", conversation.chat_id);
+    appendContextRow(elements.inboxIdentityContext, "商品 ID", conversation.item_id || "未识别");
+    appendContextRow(elements.inboxIdentityContext, "买家 ID", conversation.user_id || "未识别");
+    appendContextRow(elements.inboxIdentityContext, "消息记录", `${numberOrZero(conversation.record_count)} 条`);
+
+    elements.inboxDecisionContext.replaceChildren();
+    appendContextRow(elements.inboxDecisionContext, "意图", intentLabels[conversation.intent] || conversation.intent || "尚未决策");
+    appendContextRow(elements.inboxDecisionContext, "路由 Agent", conversation.agent || decision.routed_agent || "尚未路由");
+    appendContextRow(
+      elements.inboxDecisionContext,
+      "建议价格",
+      price.calculated_price !== undefined && price.calculated_price !== null
+        ? `¥${price.calculated_price}`
+        : "无价格决策",
+    );
+    appendContextRow(elements.inboxDecisionContext, "规则检查", rules.safe === false ? "未通过" : rules.safe === true ? "已通过" : "无记录");
+
+    elements.inboxGuardrailContext.replaceChildren();
+    const guardrails = Array.isArray(conversation.guardrails) ? conversation.guardrails : [];
+    if (!guardrails.length) {
+      const badge = document.createElement("span");
+      badge.className = "context-status-chip";
+      badge.dataset.tone = "ok";
+      badge.textContent = "未触发护栏";
+      elements.inboxGuardrailContext.append(badge);
+    } else {
+      guardrails.forEach((guardrail) => {
+        const badge = document.createElement("span");
+        badge.className = "context-status-chip";
+        badge.dataset.tone = "warning";
+        badge.textContent = String(guardrail);
+        elements.inboxGuardrailContext.append(badge);
+      });
+    }
+    if (conversation.has_fallback) {
+      const badge = document.createElement("span");
+      badge.className = "context-status-chip";
+      badge.dataset.tone = "warning";
+      badge.textContent = "模型已降级";
+      elements.inboxGuardrailContext.append(badge);
+    }
+
+    elements.inboxDeliveryContext.replaceChildren();
+    appendContextRow(elements.inboxDeliveryContext, "交付状态", deliveryLabels[conversation.delivery_status] || conversation.delivery_status || "无记录");
+    appendContextRow(elements.inboxDeliveryContext, "发送尝试", `${numberOrZero(conversation.attempt_count)} 次`);
+    appendContextRow(elements.inboxDeliveryContext, "处理说明", conversation.state_reason || "无");
+    if (conversation.delivery_reason) {
+      appendContextRow(elements.inboxDeliveryContext, "失败/跳过原因", conversation.delivery_reason);
+    }
+  }
+
+  function appendContextRow(list, label, value) {
+    const wrapper = document.createElement("div");
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const description = document.createElement("dd");
+    description.textContent = value === undefined || value === null || value === "" ? "无" : String(value);
+    wrapper.append(term, description);
+    list.append(wrapper);
+  }
+
+  function clearInboxConversation() {
+    state.selectedChatId = null;
+    state.selectedConversation = null;
+    elements.conversationEmpty.hidden = false;
+    elements.conversationContent.hidden = true;
+    elements.inboxContextEmpty.hidden = false;
+    elements.inboxContextContent.hidden = true;
+    elements.inboxOpenTraceButton.disabled = true;
+  }
+
+  function syncInboxTakeoverButton() {
+    const active = Boolean(state.selectedConversation && state.selectedConversation.takeover);
+    elements.inboxTakeoverButton.textContent = active ? "恢复自动回复" : "人工接管";
+    elements.inboxTakeoverButton.classList.toggle("button-danger-quiet", active);
+    elements.inboxTakeoverButton.classList.toggle("button-secondary", !active);
+  }
+
+  function setInboxMobilePanel(panel) {
+    if (!panel || !elements.inboxLayout) {
+      return;
+    }
+    elements.inboxLayout.dataset.mobilePanel = panel;
+    document.querySelectorAll("[data-inbox-mobile-panel]").forEach((button) => {
+      button.setAttribute("aria-selected", String(button.dataset.inboxMobilePanel === panel));
+    });
+  }
+
+  function toggleInboxStream() {
+    state.inboxStreamPaused = !state.inboxStreamPaused;
+    if (state.inboxStreamPaused) {
+      stopInboxStream();
+      setInboxStreamStatus("paused", "已暂停");
+      elements.inboxStreamToggle.setAttribute("aria-label", "恢复实时更新");
+      elements.inboxStreamToggle.setAttribute("title", "恢复实时更新");
+      return;
+    }
+    elements.inboxStreamToggle.setAttribute("aria-label", "暂停实时更新");
+    elements.inboxStreamToggle.setAttribute("title", "暂停实时更新");
+    connectInboxStream();
+  }
+
+  function stopInboxStream() {
+    if (state.inboxStreamAbort) {
+      state.inboxStreamAbort.abort();
+      state.inboxStreamAbort = null;
+    }
+    window.clearTimeout(state.inboxReconnectTimer);
+    window.clearTimeout(state.inboxPollTimer);
+    state.inboxReconnectTimer = null;
+    state.inboxPollTimer = null;
+  }
+
+  async function connectInboxStream() {
+    if (state.inboxStreamPaused || state.inboxStreamAbort) {
+      return;
+    }
+    if (state.access.tokenRequired && !getToken()) {
+      setInboxStreamStatus("auth", "需要令牌");
+      return;
+    }
+    window.clearTimeout(state.inboxReconnectTimer);
+    window.clearTimeout(state.inboxPollTimer);
+    state.inboxReconnectTimer = null;
+    state.inboxPollTimer = null;
+    const controller = new AbortController();
+    state.inboxStreamAbort = controller;
+    setInboxStreamStatus("loading", "连接中");
+
+    try {
+      const headers = new Headers({ Accept: "text/event-stream" });
+      const token = getToken();
+      if (token) {
+        headers.set("Authorization", `Bearer ${token}`);
+      }
+      const response = await fetch("/api/inbox/stream", { headers, signal: controller.signal });
+      if (!response.ok) {
+        let payload = null;
+        try {
+          payload = await response.json();
+        } catch (error) {
+          payload = null;
+        }
+        throw new ApiError(response.status, payload, response.headers.get("X-Request-ID"));
+      }
+      if (!response.body) {
+        throw new Error("浏览器不支持实时响应流。");
+      }
+      setInboxStreamStatus("live", "实时");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const result = await reader.read();
+        if (result.done) {
+          throw new Error("实时连接已关闭。");
+        }
+        buffer += decoder.decode(result.value, { stream: true });
+        const blocks = buffer.split(/\r?\n\r?\n/);
+        buffer = blocks.pop() || "";
+        blocks.forEach((block) => {
+          const data = block.split(/\r?\n/)
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(5).trim())
+            .join("\n");
+          if (!data) {
+            return;
+          }
+          try {
+            applyInboxSnapshot(JSON.parse(data), { fromStream: true });
+          } catch (error) {
+            setInboxStreamStatus("fallback", "数据异常");
+          }
+        });
+      }
+    } catch (error) {
+      if (controller.signal.aborted || state.inboxStreamPaused) {
+        return;
+      }
+      if (error instanceof ApiError && error.status === 401) {
+        renderInboxError(error);
+        setInboxStreamStatus("auth", "需要令牌");
+        return;
+      }
+      setInboxStreamStatus("fallback", "轮询恢复");
+      scheduleInboxFallback();
+    } finally {
+      if (state.inboxStreamAbort === controller) {
+        state.inboxStreamAbort = null;
+      }
+    }
+  }
+
+  function scheduleInboxFallback() {
+    if (state.inboxStreamPaused) {
+      return;
+    }
+    if (!state.inboxPollTimer) {
+      state.inboxPollTimer = window.setTimeout(async () => {
+        state.inboxPollTimer = null;
+        await loadInbox(false).catch(() => {});
+        scheduleInboxFallback();
+      }, 3000);
+    }
+    if (!state.inboxReconnectTimer) {
+      state.inboxReconnectTimer = window.setTimeout(() => {
+        state.inboxReconnectTimer = null;
+        window.clearTimeout(state.inboxPollTimer);
+        state.inboxPollTimer = null;
+        connectInboxStream();
+      }, 12000);
+    }
+  }
+
+  function setInboxStreamStatus(tone, label) {
+    elements.inboxStreamStatus.dataset.tone = tone;
+    elements.inboxStreamStatus.querySelector("strong").textContent = label;
+    elements.inboxStreamToggle.dataset.paused = String(state.inboxStreamPaused);
+  }
+
+  function renderInboxError(error) {
+    const authError = error instanceof ApiError && error.status === 401;
+    state.inboxErrorIsAuth = authError;
+    elements.inboxError.hidden = false;
+    elements.inboxEmpty.hidden = true;
+    elements.inboxErrorTitle.textContent = authError ? "需要访问令牌" : "无法读取实时会话";
+    elements.inboxErrorMessage.textContent = authError
+      ? "设置当前 API 的访问令牌后，才能订阅真实会话。"
+      : describeGenericError(error);
+    elements.inboxErrorAction.textContent = authError ? "设置令牌" : "重试";
+    elements.inboxList.setAttribute("aria-busy", "false");
+  }
+
+  function handleInboxErrorAction() {
+    if (state.inboxErrorIsAuth || (state.access.tokenRequired && !getToken())) {
+      state.retryAfterToken = () => loadInbox(true).then(() => connectInboxStream());
+      showTokenDialog("订阅实时会话需要有效令牌，请检查并重新保存。");
+      return;
+    }
+    loadInbox(true).then(() => connectInboxStream()).catch(() => {});
+  }
+
+  async function toggleSelectedTakeover() {
+    const detail = state.selectedConversation;
+    if (!detail || !state.selectedChatId) {
+      return;
+    }
+    const chatId = state.selectedChatId;
+    const active = Boolean(detail.takeover);
+    if (active && !window.confirm(`恢复会话 ${chatId} 的自动回复？`)) {
+      return;
+    }
+    setButtonBusy(elements.inboxTakeoverButton, true, active ? "恢复中…" : "接管中…");
+    try {
+      if (active) {
+        await apiFetch(`/api/takeovers/${encodeURIComponent(chatId)}`, { method: "DELETE" });
+      } else {
+        await apiFetch(`/api/takeovers/${encodeURIComponent(chatId)}`, {
+          method: "PUT",
+          body: JSON.stringify({
+            active: true,
+            item_id: detail.conversation.item_id || null,
+            ttl_seconds: 3600,
+            note: "从实时会话工作区接管",
+          }),
+        });
+      }
+      await Promise.all([loadInbox(false), loadTakeovers(false)]);
+      await loadInboxConversation(chatId);
+      showNotice(
+        active ? "已恢复自动回复" : "人工接管已生效",
+        active ? `会话 ${chatId} 已重新进入 Agent 决策链。` : `会话 ${chatId} 的新消息将停止自动回复。`,
+        "ok",
+        3200,
+      );
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        state.retryAfterToken = () => toggleSelectedTakeover();
+        showTokenDialog("切换人工接管需要有效令牌。");
+      }
+      showNotice("接管状态更新失败", describeGenericError(error), "error");
+    } finally {
+      setButtonBusy(elements.inboxTakeoverButton, false);
+      syncInboxTakeoverButton();
+    }
+  }
+
+  function openSelectedConversationTrace() {
+    if (!state.selectedChatId) {
+      return;
+    }
+    elements.traceSearch.value = state.selectedChatId;
+    elements.traceIntentFilter.value = "";
+    elements.traceStatusFilter.value = "";
+    applyTraceFilters();
+    activateView("traces", { updateHash: true, focus: true });
   }
 
   function openLatestTrace() {
@@ -1658,7 +2267,10 @@
     if (retry) {
       await Promise.resolve(retry()).catch(() => {});
     } else {
-      await loadTraces(true).catch(() => {});
+      await Promise.allSettled([loadTraces(true), loadInbox(true)]);
+      stopInboxStream();
+      state.inboxStreamPaused = false;
+      connectInboxStream();
     }
   }
 
@@ -1671,6 +2283,10 @@
     }
     elements.accessToken.value = "";
     state.retryAfterToken = null;
+    if (state.access.tokenRequired) {
+      stopInboxStream();
+      setInboxStreamStatus("auth", "需要令牌");
+    }
     updateTokenIndicator();
     elements.tokenDialogStatus.textContent = state.access.tokenRequired
       ? "令牌已移除。当前 API 仍要求令牌。"

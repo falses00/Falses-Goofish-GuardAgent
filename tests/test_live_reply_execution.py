@@ -101,11 +101,14 @@ def test_live_dry_run_records_once_without_network_send(tmp_path):
     dedupe_key = ReplyOutbox.build_dedupe_key("chat_1", "item_1", "buyer_1", event_id)
     record = outbox.get(dedupe_key)
     snapshot = bot.db.get_memory_snapshot("chat_1")
+    chat_events = list(reversed(live.chat_events.list_recent(chat_id="chat_1")))
 
     assert record.status == "skipped"
     assert record.last_error == "dry_run"
     assert record.attempt_count == 1
     assert len(snapshot.messages) == 2
+    assert [event.role for event in chat_events] == ["buyer", "assistant"]
+    assert chat_events[-1].status == "simulated"
     assert websocket.payloads == []
 
 
