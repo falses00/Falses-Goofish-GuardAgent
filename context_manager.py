@@ -1,9 +1,14 @@
 import sqlite3
 import os
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from loguru import logger
+
+from core.conversation_memory import (
+    ConversationMemory,
+    ConversationMemoryPolicy,
+)
 
 
 @dataclass
@@ -15,6 +20,7 @@ class ChatMemorySnapshot:
     bargain_count: int = 0
     lowest_price_committed: float = None
     buyer_highest_offer: float = None
+    long_term_memories: list = field(default_factory=list)
 
 
 class ChatContextManager:
@@ -35,11 +41,28 @@ class ChatContextManager:
         """
         self.max_history = max_history
         self.db_path = db_path or os.getenv("CHAT_DB_PATH", "data/chat_history.db")
+        self.recent_context_limit = self._bounded_env_int(
+            "CONTEXT_RECENT_MESSAGES", 16, minimum=4, maximum=50
+        )
+        self.memory_recall_limit = self._bounded_env_int(
+            "LONG_TERM_MEMORY_RECALL_LIMIT", 8, minimum=1, maximum=20
+        )
+        self.memory_max_entries = self._bounded_env_int(
+            "LONG_TERM_MEMORY_MAX_ENTRIES", 64, minimum=8, maximum=256
+        )
         try:
             self.busy_timeout_ms = max(1000, int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "30000")))
         except ValueError:
             self.busy_timeout_ms = 30000
         self._init_db()
+
+    @staticmethod
+    def _bounded_env_int(name, default, minimum, maximum):
+        try:
+            value = int(os.getenv(name, str(default)))
+        except ValueError:
+            value = default
+        return max(minimum, min(value, maximum))
 
     def _connect(self):
         conn = sqlite3.connect(self.db_path, timeout=self.busy_timeout_ms / 1000)
@@ -151,6 +174,27 @@ class ChatContextManager:
         ON committed_source_turns (chat_id)
         ''')
 
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS conversation_memories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id TEXT NOT NULL,
+            item_id TEXT,
+            category TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            priority INTEGER NOT NULL,
+            fingerprint TEXT NOT NULL,
+            source_message_id TEXT,
+            created_at DATETIME NOT NULL,
+            last_seen_at DATETIME NOT NULL,
+            UNIQUE(chat_id, fingerprint)
+        )
+        ''')
+        cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_conversation_memories_chat
+        ON conversation_memories (chat_id, priority DESC, last_seen_at DESC)
+        ''')
+
         # 创建商品信息表
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS items (
@@ -162,9 +206,129 @@ class ChatContextManager:
         )
         ''')
 
+        self._backfill_long_term_memories(cursor)
+
         conn.commit()
         conn.close()
         logger.info(f"聊天历史数据库初始化完成: {self.db_path}")
+
+    def _backfill_long_term_memories(self, cursor):
+        """Seed structured memory from retained legacy messages without model inference."""
+        cursor.execute(
+            """
+            SELECT chat_id, item_id, role, content, source_message_id, timestamp
+            FROM messages
+            WHERE chat_id IS NOT NULL AND chat_id != ''
+            ORDER BY id ASC
+            """
+        )
+        chat_ids = set()
+        for chat_id, item_id, role, content, source_message_id, timestamp in cursor.fetchall():
+            chat_ids.add(chat_id)
+            self._remember_message(
+                cursor,
+                chat_id=chat_id,
+                item_id=item_id,
+                role=role,
+                content=content,
+                source_message_id=source_message_id,
+                now=timestamp or datetime.now().isoformat(),
+                prune=False,
+            )
+            if role == "assistant":
+                self._record_manual_price_commitment(
+                    cursor,
+                    chat_id,
+                    content,
+                    timestamp or datetime.now().isoformat(),
+                )
+        for chat_id in chat_ids:
+            self._prune_long_term_memories(cursor, chat_id)
+
+    def _remember_message(
+        self,
+        cursor,
+        chat_id,
+        item_id,
+        role,
+        content,
+        source_message_id=None,
+        now=None,
+        prune=True,
+    ):
+        candidate = ConversationMemoryPolicy.extract(role, content)
+        if candidate is None:
+            return False
+        timestamp = now or datetime.now().isoformat()
+        cursor.execute(
+            """
+            INSERT INTO conversation_memories (
+                chat_id, item_id, category, role, content, priority,
+                fingerprint, source_message_id, created_at, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, fingerprint)
+            DO UPDATE SET
+                source_message_id = COALESCE(
+                    conversation_memories.source_message_id,
+                    excluded.source_message_id
+                ),
+                last_seen_at = excluded.last_seen_at
+            """,
+            (
+                chat_id,
+                item_id,
+                candidate.category,
+                candidate.role,
+                candidate.content,
+                candidate.priority,
+                candidate.fingerprint,
+                source_message_id,
+                timestamp,
+                timestamp,
+            ),
+        )
+        if prune:
+            self._prune_long_term_memories(cursor, chat_id)
+        return True
+
+    def _prune_long_term_memories(self, cursor, chat_id):
+        cursor.execute(
+            """
+            DELETE FROM conversation_memories
+            WHERE chat_id = ?
+              AND id NOT IN (
+                SELECT id FROM conversation_memories
+                WHERE chat_id = ?
+                ORDER BY priority DESC, last_seen_at DESC, id DESC
+                LIMIT ?
+              )
+            """,
+            (chat_id, chat_id, self.memory_max_entries),
+        )
+
+    @staticmethod
+    def _record_manual_price_commitment(cursor, chat_id, content, now):
+        committed_price = ConversationMemoryPolicy.extract_seller_price_commitment(content)
+        if committed_price is None:
+            return None
+        cursor.execute(
+            """
+            INSERT INTO chat_bargain_counts (
+                chat_id, count, lowest_price_committed, last_updated
+            ) VALUES (?, 0, ?, ?)
+            ON CONFLICT(chat_id)
+            DO UPDATE SET
+                lowest_price_committed = CASE
+                    WHEN chat_bargain_counts.lowest_price_committed IS NULL
+                        OR excluded.lowest_price_committed < chat_bargain_counts.lowest_price_committed
+                        THEN excluded.lowest_price_committed
+                    ELSE chat_bargain_counts.lowest_price_committed
+                END,
+                last_updated = excluded.last_updated
+            """,
+            (chat_id, committed_price, now),
+        )
+        return committed_price
 
 
 
@@ -253,10 +417,28 @@ class ChatContextManager:
 
         try:
             # 插入新消息，使用chat_id作为额外标识
+            now = datetime.now().isoformat()
             cursor.execute(
                 "INSERT INTO messages (user_id, item_id, role, content, timestamp, chat_id) VALUES (?, ?, ?, ?, ?, ?)",
-                (user_id, item_id, role, content, datetime.now().isoformat(), chat_id)
+                (user_id, item_id, role, content, now, chat_id)
             )
+
+            self._remember_message(
+                cursor,
+                chat_id=chat_id,
+                item_id=item_id,
+                role=role,
+                content=content,
+                now=now,
+            )
+            if role == "assistant":
+                committed_price = self._record_manual_price_commitment(
+                    cursor, chat_id, content, now
+                )
+                if committed_price is not None:
+                    logger.info(
+                        f"已记录卖家人工报价承诺: chat_id={chat_id}, price={committed_price}"
+                    )
 
             self._trim_messages_by_chat(cursor, chat_id)
 
@@ -295,11 +477,28 @@ class ChatContextManager:
                 "INSERT INTO messages (user_id, item_id, role, content, timestamp, chat_id) VALUES (?, ?, ?, ?, ?, ?)",
                 (user_id, item_id, "user", user_text, now, chat_id)
             )
+            self._remember_message(
+                cursor,
+                chat_id=chat_id,
+                item_id=item_id,
+                role="user",
+                content=user_text,
+                now=now,
+            )
 
             if assistant_text and assistant_text != "-":
+                assistant_now = datetime.now().isoformat()
                 cursor.execute(
                     "INSERT INTO messages (user_id, item_id, role, content, timestamp, chat_id) VALUES (?, ?, ?, ?, ?, ?)",
-                    (assistant_id, item_id, "assistant", assistant_text, datetime.now().isoformat(), chat_id)
+                    (assistant_id, item_id, "assistant", assistant_text, assistant_now, chat_id)
+                )
+                self._remember_message(
+                    cursor,
+                    chat_id=chat_id,
+                    item_id=item_id,
+                    role="assistant",
+                    content=assistant_text,
+                    now=assistant_now,
                 )
 
             if intent == "price":
@@ -402,8 +601,18 @@ class ChatContextManager:
                     """,
                     (user_id, item_id, "user", user_text, now, chat_id, source_message_id),
                 )
+                self._remember_message(
+                    cursor,
+                    chat_id=chat_id,
+                    item_id=item_id,
+                    role="user",
+                    content=user_text,
+                    source_message_id=source_message_id,
+                    now=now,
+                )
 
             if target_level == "full":
+                assistant_now = datetime.now().isoformat()
                 cursor.execute(
                     """
                     INSERT INTO messages (
@@ -415,10 +624,19 @@ class ChatContextManager:
                         item_id,
                         "assistant",
                         assistant_text,
-                        datetime.now().isoformat(),
+                        assistant_now,
                         chat_id,
                         source_message_id,
                     ),
+                )
+                self._remember_message(
+                    cursor,
+                    chat_id=chat_id,
+                    item_id=item_id,
+                    role="assistant",
+                    content=assistant_text,
+                    source_message_id=source_message_id,
+                    now=assistant_now,
                 )
                 if intent == "price":
                     cursor.execute(
@@ -483,6 +701,51 @@ class ChatContextManager:
         finally:
             conn.close()
 
+    def get_long_term_memories(self, chat_id, query=None, limit=None):
+        """Retrieve bounded, exact-source memories for one conversation."""
+        safe_limit = max(1, min(int(limit or self.memory_recall_limit), 50))
+        conn = self._connect()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT category, role, content, priority, source_message_id,
+                       created_at, last_seen_at
+                FROM conversation_memories
+                WHERE chat_id = ?
+                ORDER BY priority DESC, last_seen_at DESC, id DESC
+                """,
+                (chat_id,),
+            )
+            memories = [
+                ConversationMemory(
+                    category=row[0],
+                    role=row[1],
+                    content=row[2],
+                    priority=row[3],
+                    source_message_id=row[4],
+                    created_at=row[5],
+                    last_seen_at=row[6],
+                )
+                for row in cursor.fetchall()
+            ]
+            if query:
+                return ConversationMemoryPolicy.rank(memories, query, safe_limit)
+            return memories[:safe_limit]
+        except Exception as e:
+            logger.error(f"获取会话长期记忆出错: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def build_memory_prompt(self, chat_id, user_msg):
+        memories = self.get_long_term_memories(
+            chat_id,
+            query=user_msg,
+            limit=self.memory_recall_limit,
+        )
+        return ConversationMemoryPolicy.build_prompt(memories), memories
+
     def get_memory_snapshot(self, chat_id):
         """
         Return messages, bargain count, and price commitments in one consistent snapshot.
@@ -493,10 +756,13 @@ class ChatContextManager:
         try:
             cursor.execute(
                 """
-                SELECT role, content FROM messages
-                WHERE chat_id = ?
-                ORDER BY timestamp ASC
-                LIMIT ?
+                SELECT role, content FROM (
+                    SELECT id, role, content, timestamp FROM messages
+                    WHERE chat_id = ?
+                    ORDER BY timestamp DESC, id DESC
+                    LIMIT ?
+                )
+                ORDER BY timestamp ASC, id ASC
                 """,
                 (chat_id, self.max_history)
             )
@@ -516,12 +782,37 @@ class ChatContextManager:
             else:
                 bargain_count, lowest_price_committed, buyer_highest_offer = 0, None, None
 
+            cursor.execute(
+                """
+                SELECT category, role, content, priority, source_message_id,
+                       created_at, last_seen_at
+                FROM conversation_memories
+                WHERE chat_id = ?
+                ORDER BY priority DESC, last_seen_at DESC, id DESC
+                LIMIT 20
+                """,
+                (chat_id,),
+            )
+            long_term_memories = [
+                ConversationMemory(
+                    category=memory_row[0],
+                    role=memory_row[1],
+                    content=memory_row[2],
+                    priority=memory_row[3],
+                    source_message_id=memory_row[4],
+                    created_at=memory_row[5],
+                    last_seen_at=memory_row[6],
+                ).to_dict()
+                for memory_row in cursor.fetchall()
+            ]
+
             return ChatMemorySnapshot(
                 chat_id=chat_id,
                 messages=messages,
                 bargain_count=bargain_count,
                 lowest_price_committed=lowest_price_committed,
                 buyer_highest_offer=buyer_highest_offer,
+                long_term_memories=long_term_memories,
             )
         except Exception as e:
             logger.error(f"获取会话记忆快照时出错: {e}")
@@ -539,12 +830,33 @@ class ChatContextManager:
         Returns:
             list: 包含对话历史的列表
         """
-        snapshot = self.get_memory_snapshot(chat_id)
-        messages = snapshot.messages
-        if snapshot.bargain_count > 0:
+        conn = self._connect()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT role, content FROM (
+                    SELECT id, role, content, timestamp FROM messages
+                    WHERE chat_id = ?
+                    ORDER BY timestamp DESC, id DESC
+                    LIMIT ?
+                )
+                ORDER BY timestamp ASC, id ASC
+                """,
+                (chat_id, self.recent_context_limit),
+            )
+            messages = [
+                {"role": role, "content": content}
+                for role, content in cursor.fetchall()
+            ]
+        finally:
+            conn.close()
+
+        bargain_count = self.get_bargain_count_by_chat(chat_id)
+        if bargain_count > 0:
             messages.append({
                 "role": "system",
-                "content": f"议价次数: {snapshot.bargain_count}"
+                "content": f"议价次数: {bargain_count}"
             })
 
         return messages
@@ -706,6 +1018,8 @@ class ChatContextManager:
         try:
             cursor.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
             cursor.execute("DELETE FROM chat_bargain_counts WHERE chat_id = ?", (chat_id,))
+            cursor.execute("DELETE FROM conversation_memories WHERE chat_id = ?", (chat_id,))
+            cursor.execute("DELETE FROM committed_source_turns WHERE chat_id = ?", (chat_id,))
             conn.commit()
             logger.debug(f"已重置会话状态: {chat_id}")
         except Exception as e:

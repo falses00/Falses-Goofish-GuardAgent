@@ -47,17 +47,26 @@ python main.py --mode cli
 
 - 买家没有给具体价格时，只做小幅让步。
 - 买家出价低于底线时，拒绝并给出安全反报价。
-- 买家出价接近我方底线时，可直接接受成交。
+- 买家重复同一低价或只说“再少点”时，维持历史报价，不再单方面降价。
+- 买家提高出价且接近我方历史报价时，可像真人卖家一样爽快接受成交。
 - 买家出价高于历史承诺价时，不再把报价抬高，避免前后矛盾。
+- LLM 润色后会校验所有带“元/块”的金额；漏报或擅改价格时改用确定性真人话术。
 
-### 3. SQLite 价格承诺记忆
+### 3. 分层会话记忆
 
-`context_manager.py` 维护会话历史、议价次数、我方最低承诺价和买家最高出价。
+`context_manager.py` 不再把“最近 N 条聊天”当作全部记忆，而是维护三层状态：
+
+- 工作记忆：默认只向模型注入最近 16 条消息，降低长上下文干扰。
+- 长期语义记忆：`core/conversation_memory.py` 从买家偏好、配送要求、关注点和卖家承诺中保存高信号原话，按当前问题渐进召回。
+- 确定性状态：议价次数、我方最低承诺价和买家最高出价使用结构化字段，不依赖 LLM 摘要。
+
+长期记忆按 `chat_id` 隔离，带来源消息 ID、类别和时间；不让模型自由改写事实，也不把买家愿望升级成卖家承诺。商品规则和定价规则属于固定 procedural memory，每轮从代码与配置重新加载，不允许聊天内容覆盖。
 
 价格记忆采用保守更新策略：
 
 - `lowest_price_committed` 只会记录更低的我方承诺价。
 - `buyer_highest_offer` 只会记录更高的买家出价。
+- 人工接管时卖家明确说出的成交报价也会同步到结构化承诺；恢复自动回复后不会忘记人工已经报过的价格，邮费等非商品价格会被排除。
 - live 模式会按真实 `chat_id` 隔离会话，不再让不同买家共享 mock 会话状态。
 
 ### 4. JSON 商品知识库
@@ -65,6 +74,8 @@ python main.py --mode cli
 `data/product_info.json` 保存商品标题、原价、最低价、成色、拆修、配件、发货、面交和常见问题。
 
 当买家询问电池、成色、划痕、配件、拆修、快递、面交等问题时，`FAQExpert` 会提取相关事实并注入模型上下文，减少幻觉和售后争议。
+
+生成后还会校验百分比、容量、循环次数和发货时长等高风险值。若模型复述了买家提供的错误数字或编造了商品资料中不存在的值，系统会改用当前商品证据生成确定性回复。
 
 ### 5. 闲鱼 WebSocket 挂机模式
 
@@ -468,7 +479,7 @@ python tools/run_agent_eval.py --min-score 1.0
 - 回复执行 Outbox，防止同一条买家事件因重连或重复同步被重复发送。
 - FastAPI `/api/reply` 服务接口、memory snapshot、trace JSONL 回查与决策阶段耗时。
 - 空消息等非法输入返回 422，避免脏请求进入 Agent 决策链路。
-- 8 个场景 11 轮离线 Agent 评测集，覆盖意图路由、商品事实命中、混合规格与报价、护栏触发、价格决策和最终记忆状态。
+- 8 个场景 12 轮离线 Agent 评测集，覆盖意图路由、商品事实命中、混合规格与报价、重复低价守价、价格决策和最终记忆状态。
 - 商品知识库关键词命中。
 - 当前商品事实优先，禁止跨商品串用演示知识库。
 - 动态 Agent 注册、优先级路由与 Prompt 重载保留。
@@ -485,7 +496,7 @@ python tools/run_agent_eval.py --min-score 1.0
 - `api/app.py`：服务化接口复用同一套 Agent core，方便外部系统集成和自动化验证。
 - `.github/workflows/ci.yml`：CI 自动跑单测、编译、doctor、runtime smoke、agent eval gate 和当前仓库镜像构建。
 
-评测会检查 `intent`、`routed_agent`、`guardrails`、`knowledge.matched`、`price_decision.action`、`buyer_offer`、`calculated_price`、回复包含/排除词、规则安全状态、`bargain_count`、`lowest_price_committed` 和 `buyer_highest_offer`，避免项目退化成只看最终回复的 demo。当前 golden set 为 8 个场景 11 轮；它是确定性回归门禁，不替代线上模型质量评估。
+评测会检查 `intent`、`routed_agent`、`guardrails`、`knowledge.matched`、`memory.retrieved`、`price_decision.action`、`buyer_offer`、`calculated_price`、回复包含/排除词、规则安全状态、`bargain_count`、`lowest_price_committed` 和 `buyer_highest_offer`，避免项目退化成只看最终回复的 demo。当前 golden set 为 8 个场景 12 轮；它是确定性回归门禁，不替代线上模型质量评估。
 
 ## 简历项目经历
 
@@ -507,6 +518,9 @@ python tools/run_agent_eval.py --min-score 1.0
 | `COOKIES_STR` | 闲鱼 / Goofish 网页端 Cookie，仅 xianyu 模式需要 |
 | `NON_INTERACTIVE` | 非交互启动开关；容器中为 `true`，配置缺失时 fail-fast |
 | `DEFAULT_DISCOUNT_LIMIT` | 最低折扣比例，例如 `0.85` 表示最多降到 8.5 折 |
+| `CONTEXT_RECENT_MESSAGES` | 每轮注入模型的最近消息数，默认 `16`，与长期记忆存储分离 |
+| `LONG_TERM_MEMORY_RECALL_LIMIT` | 每轮最多召回的相关长期记忆原话数，默认 `8` |
+| `LONG_TERM_MEMORY_MAX_ENTRIES` | 每个会话最多保存的高信号长期记忆卡片，默认 `64` |
 | `PRODUCT_RULES_PATH` | 商品规则中心路径，默认 `data/product_rules.json` |
 | `HUMAN_REPLY_STYLE_PATH` | 真人卖家回复风格配置路径，默认 `data/human_reply_style.json` |
 | `REPLY_OUTBOX_DB_PATH` | 自动回复执行 Outbox SQLite 路径，默认 `data/reply_outbox.db` |

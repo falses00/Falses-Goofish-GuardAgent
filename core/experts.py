@@ -16,7 +16,9 @@ class BargainExpert:
     def calculate_next_price(
         self,
         buyer_offer: Optional[float],
-        last_committed_price: Optional[float]
+        last_committed_price: Optional[float],
+        bargain_count: int = 0,
+        buyer_highest_offer: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         根据买家出价和上一次的报价，计算我方的新报价。
@@ -28,14 +30,20 @@ class BargainExpert:
         Returns:
             Dict 包含：
             - "price": 新的合理出价 (float)
-            - "action": 决策动作 ("ACCEPT" | "REFUSE_AND_COUNTER" | "NEGOTIATE")
+            - "action": 决策动作
+              ("ACCEPT" | "REFUSE_AND_COUNTER" | "REFUSE_AND_HOLD" | "NEGOTIATE")
         """
         committed_price = last_committed_price if last_committed_price is not None else self.original_price
         committed_price = max(self.min_price, min(committed_price, self.original_price))
 
-        # 1. 如果买家没有具体出价，属于“泛议价”
+        # 1. 泛议价只在首轮主动小让；后续必须由买家给出进展。
         if buyer_offer is None:
-            # 给出首轮微调 concession (比如原价到最低价差距的 15%)，引导买家出价
+            if bargain_count > 0 or committed_price <= self.min_price:
+                return {
+                    "price": committed_price,
+                    "action": "REFUSE_AND_HOLD",
+                    "reason": "买家未给出新报价，维持历史承诺价，避免卖家单方面连续让步",
+                }
             concession = (self.original_price - self.min_price) * 0.15
             suggested = round(committed_price - concession)
             suggested = max(self.min_price, suggested)
@@ -46,16 +54,7 @@ class BargainExpert:
                 "reason": "买家泛议价，主动微降以示诚意，引导其具体出价"
             }
 
-        # 2. 如果买家提到了具体报价
-        # 情况 A：买家出价已经达到或超出了原定价，直接成交
-        if buyer_offer >= self.original_price:
-            return {
-                "price": committed_price,
-                "action": "ACCEPT",
-                "reason": "买家出价高于或等于原价"
-            }
-
-        # 情况 A2：买家出价已经达到或超过我们之前承诺过的价格，直接按承诺价成交。
+        # 2. 达到历史承诺价时必须兑现承诺，不能临时涨价。
         if buyer_offer >= committed_price:
             return {
                 "price": committed_price,
@@ -63,31 +62,44 @@ class BargainExpert:
                 "reason": "买家出价已达到我方历史承诺价，直接同意成交"
             }
 
-        # 情况 B：买家出价极低，甚至低于我们的绝对底价 (min_price)
+        buyer_made_progress = (
+            buyer_highest_offer is None or buyer_offer > buyer_highest_offer
+        )
+        if bargain_count > 0 and not buyer_made_progress:
+            return {
+                "price": committed_price,
+                "action": "REFUSE_AND_HOLD",
+                "reason": "买家报价没有高于历史最高出价，维持我方历史承诺价",
+            }
+
+        gap = committed_price - buyer_offer
+        acceptance_gap = max(
+            10.0,
+            self.original_price * (0.005 if bargain_count == 0 else 0.015),
+        )
+        if buyer_offer >= self.min_price and gap <= acceptance_gap:
+            return {
+                "price": buyer_offer,
+                "action": "ACCEPT",
+                "reason": "买家报价在底价之上且已接近我方历史报价，爽快成交",
+            }
+
+        # 3. 低于保留价始终拒绝。只有买家提高报价时才给一次更小的反报价让步。
         if buyer_offer < self.min_price:
-            # 我们拒绝，并在上一次的价格承诺基础上退让一点点 (差额的30%)，但绝对不低过底线
-            suggested = committed_price - (committed_price - self.min_price) * 0.3
+            concession_rate = 0.3 if bargain_count == 0 else 0.15
+            suggested = committed_price - (committed_price - self.min_price) * concession_rate
             suggested = max(self.min_price, round(suggested))
 
             return {
                 "price": suggested,
                 "action": "REFUSE_AND_COUNTER",
-                "reason": f"买家出价 {buyer_offer} 低于绝对底线 {self.min_price}，予以拒绝并报出当前折中底线价"
+                "reason": f"买家出价 {buyer_offer} 低于绝对底线 {self.min_price}，拒绝并给出有限反报价"
             }
 
-        # 情况 C：买家出价在绝对底价与上一次承诺价之间
-        # 我们进行拉锯，向对方的价格退让 40% 的距离，促进交易
-        gap = committed_price - buyer_offer
-        suggested = committed_price - gap * 0.4
+        # 4. 合理区间内按轮次缩小让步幅度，避免越谈越快。
+        concession_rate = 0.4 if bargain_count == 0 else 0.25
+        suggested = committed_price - gap * concession_rate
         suggested = max(self.min_price, round(suggested))
-
-        # 如果折中后算出的新出价与买家出价极其贴近（相差 10 元以内），则痛快同意对方价格
-        if abs(suggested - buyer_offer) <= 10:
-            return {
-                "price": buyer_offer,
-                "action": "ACCEPT",
-                "reason": "买家报价与我方折中报价极为接近，直接同意成交"
-            }
 
         return {
             "price": suggested,

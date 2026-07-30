@@ -104,6 +104,7 @@ class MemorySnapshotResponse(BaseModel):
     bargain_count: int
     lowest_price_committed: Optional[float] = None
     buyer_highest_offer: Optional[float] = None
+    long_term_memories: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class ReplyResponse(BaseModel):
@@ -154,6 +155,7 @@ def _snapshot_to_response(snapshot) -> MemorySnapshotResponse:
         bargain_count=snapshot.bargain_count,
         lowest_price_committed=snapshot.lowest_price_committed,
         buyer_highest_offer=snapshot.buyer_highest_offer,
+        long_term_memories=snapshot.long_term_memories,
     )
 
 

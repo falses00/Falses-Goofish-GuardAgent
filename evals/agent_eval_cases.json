@@ -32,20 +32,32 @@
         }
       },
       {
+        "user": "3000 真不能给我吗？",
+        "expect": {
+          "intent": "price",
+          "routed_agent": "PriceAgent",
+          "price_action": "REFUSE_AND_HOLD",
+          "buyer_offer": 3000.0,
+          "calculated_price": 4149,
+          "never_below_min_price": true,
+          "guardrails_contains": ["buyer_progress_required_for_concession"]
+        }
+      },
+      {
         "user": "4100 可以的话我马上拍",
         "expect": {
           "intent": "price",
           "routed_agent": "PriceAgent",
-          "price_action": "NEGOTIATE",
+          "price_action": "ACCEPT",
           "buyer_offer": 4100.0,
-          "calculated_price": 4129,
+          "calculated_price": 4100,
           "never_below_min_price": true
         }
       }
     ],
     "final_expect": {
-      "bargain_count": 2,
-      "lowest_price_committed": 4129.0,
+      "bargain_count": 3,
+      "lowest_price_committed": 4100.0,
       "buyer_highest_offer": 4100.0
     }
   },
@@ -67,9 +79,9 @@
         "expect": {
           "intent": "price",
           "routed_agent": "PriceAgent",
-          "price_action": "NEGOTIATE",
+          "price_action": "ACCEPT",
           "buyer_offer": 4200.0,
-          "calculated_price": 4214,
+          "calculated_price": 4200,
           "never_below_min_price": true
         }
       },
@@ -80,14 +92,14 @@
           "routed_agent": "PriceAgent",
           "price_action": "ACCEPT",
           "buyer_offer": 4300.0,
-          "calculated_price": 4214,
+          "calculated_price": 4200,
           "never_below_min_price": true
         }
       }
     ],
     "final_expect": {
       "bargain_count": 3,
-      "lowest_price_committed": 4214.0,
+      "lowest_price_committed": 4200.0,
       "buyer_highest_offer": 4300.0
     }
   },

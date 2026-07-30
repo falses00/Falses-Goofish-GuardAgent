@@ -9,14 +9,15 @@
 **项目描述：** 基于闲鱼真实 WebSocket 消息链路构建本地优先交易 Agent，将商品咨询、议价、承诺校验和回复执行拆分为可观测、可回放的决策链路；LLM 负责自然语言表达，价格、商品事实、会话承诺和发送幂等由确定性模块控制。
 
 - 重构 `IntentRouter -> TechAgent / PriceAgent / DefaultAgent -> Guardrails -> LLM` 多 Agent 架构，通过可插拔注册表、商品事实检索和真人化表达层支持咨询、砍价与交易疑虑场景；真实 Agnes 三轮演示全部正常返回，Trace 可解释路由、知识来源、护栏及各阶段耗时。
-- 将议价底线从 Prompt 剥离为确定性 `BargainExpert`，结合商品级 `min_price`、历史最低承诺价与买家最高报价生成单调价格决策；实测对 3500 元报价拒绝并反报价 4149 元，严格高于 3800 元底线。
+- 将议价底线从 Prompt 剥离为确定性 `BargainExpert`，基于保留价、历史承诺、买家最高出价和议价轮次输出接受/协商/拒绝反报价/拒绝守价四态决策；修复买家重复 3000 元时卖家从 4149 连续自降的问题，并用金额回复契约拦截 LLM 擅改报价。
+- 设计工作记忆、可审计长期原话、结构化交易状态和固定业务规则四层记忆体系；默认只注入最近 16 条消息，按当前问题召回买家偏好与卖家承诺，以角色、来源消息 ID 和证据优先级防止长对话失忆，并将人工卖家报价同步到结构化价格状态。
 - 设计 SQLite 会话记忆与 Reply Outbox，以终态驱动、源事件幂等方式提交用户/助手 turn，基于事件哈希、事务 claim、状态机和超时租约抑制重连重复发送；失败发送不写助手记忆，离线 replay 验证重复事件只写入一轮且网络发送为 0。
 - 将人工接管从 Worker 内存集合重构为跨进程 SQLite 状态机，支持控制台/卖家命令双入口、TTL 自动恢复与完整审计；在 Agent 前后、Outbox 领取和网络发送前设置多重门禁，并以两阶段状态提交避免未发送报价污染会话承诺。
 - 完成真实闲鱼 Token 获取、WebSocket 注册、小时级 Token 刷新与断线重连验证；根据约 5.5 小时运行日志定位 DNS 暂态故障误判与陈旧认证错误问题，引入 typed transient error、HTTP 超时、有限重试及成功后状态清理，避免无人值守进程错误退出或放大平台请求。
 - 为业务心跳增加超时主动断链，并实现带抖动的指数重连退避；设计无密钥原子运行状态快照与 stale 检测，支持通过 CLI/守护进程判断注册、重连、心跳超时和认证失败，避免半开连接与断网请求风暴。
 - 将同步 Token/商品 API 与 Agnes SDK 调用迁移到工作线程，通过异步锁保护共享 HTTP Session 和 Agent Trace 状态，使慢模型与上游超时不再阻塞 WebSocket 心跳和消息消费循环。
 - 构建本地卖家操作台，聚合 worker 在线状态、dry-run 安全态、Agent 模拟、价格决策、规则护栏、记忆与 Trace；增加可选 Bearer 鉴权、ready/live 探针、安全响应头和桌面/移动端响应式布局，浏览器实测无横向溢出，正文与主按钮对比度分别为 17.84:1、4.63:1。
-- 建立 `doctor / status / smoke / demo / replay / golden eval` 分层验证体系和 CI 门禁，覆盖模型故障降级、跨商品事实隔离、混合规格与报价路由、价格底线、规则承诺、人工接管、Outbox 并发、API 请求回放、事件循环阻塞、状态陈旧、敏感字段污染和认证失败路径；当前 139 项 pytest、8 个场景 11 轮 golden eval 全部通过，并由 CI 持续验证 `websockets 13.1 / 15.x` 兼容性。
+- 建立 `doctor / status / smoke / demo / replay / golden eval` 分层验证体系和 CI 门禁，覆盖模型故障降级、长对话召回、买家记忆越权、事实值冲突、重复低价守价、人工报价续接、跨商品事实隔离、规则承诺、Outbox 并发、API 请求回放和认证失败路径；当前 156 项 pytest、8 个场景 12 轮 golden eval 全部通过，并由 CI 持续验证 `websockets 13.1 / 15.x` 兼容性。
 
 **项目链接：** https://github.com/falses00/Falses-Goofish-GuardAgent
 
@@ -62,8 +63,8 @@ Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、HTML/CSS/JavaScr
 - 基于 FastAPI `StreamingResponse` 实现 Bearer 鉴权 SSE，以三库轻量 change token 替代每连接每秒全量 Inbox 聚合，状态变化时才生成快照；常规队列有界读取，显式搜索定向覆盖完整事件历史，前端断线后降级到 3 秒轮询并周期重连。
 - 设计持久化 human-in-the-loop 控制面，以 `chat_id` 为隔离边界管理人工接管、TTL 与审计事件；API console 和 live Worker 共享 SQLite 事实源，价格 Agent 采用“无副作用生成 -> Outbox 持久化 -> 终态驱动记忆”，并通过对抗测试验证生成中接管、入队后接管、跨实例同步和 pending Outbox 取消。
 - 实现交付决策引擎，根据商品类型、订单状态和是否需要人工确认输出 `wait_for_payment / manual_review / auto_deliver` 等可审计动作，为后续自动发货执行层提供安全前置判断。
-- 设计 `BargainExpert` 确定性议价策略，将价格底线、历史承诺价、买家最高出价从 LLM Prompt 中剥离为代码级约束，避免模型被诱导突破底价或前后报价不一致。
-- 基于 SQLite 实现会话级状态记忆，持久化聊天历史、议价次数、我方最低承诺价和买家最高出价；通过事务化 `append_turn` 原子写入用户消息、助手回复和议价次数，避免半轮上下文污染，并采用单调更新策略保证价格承诺只降不升、买家报价只取最高。
+- 设计 `BargainExpert` 确定性议价状态机，将价格底线、历史承诺价、买家最高出价和买家是否实际加价从 LLM Prompt 中剥离为代码级约束；输出四类动作并对生成结果二次校验，买家不加价时不再单方面降价，接近历史报价时可直接成交。
+- 基于 SQLite 实现分层会话记忆：最近消息作为工作记忆，高信号历史原话进入带角色/类别/来源的长期记忆卡片，议价次数与价格承诺单独结构化；通过渐进召回、证据优先级和原子 `append_turn` 避免长上下文干扰、半轮污染与买家提示覆盖卖家规则。
 - 引入 JSON 商品知识库与 `FAQExpert`，针对成色、拆修、配件、物流、面交等高风险问题注入事实上下文，降低 LLM 编造商品信息导致售后纠纷的风险。
 - 修复跨商品事实污染：`TechAgent` 强制优先使用当前消息携带的商品上下文，仅在缺失结构化数据时使用演示知识库，并用对抗测试证明阿里云教程不会混入 iPad 屏幕/电池信息。
 - 建立模型故障隔离层，将超时、空响应和 provider 异常降级为可发送的确定性安全回复；议价降级仍引用代码计算价格，Trace 记录 `model_fallback` 与错误类型，避免 LLM 故障拖垮 WebSocket 消费循环。
@@ -100,7 +101,7 @@ Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、HTML/CSS/JavaScr
 如果需要放在简历里更偏结果，可以写：
 
 - 将原项目从单一自动回复改造为 4 类 Agent 协同链路，补齐价格护栏、商品事实约束、会话记忆、服务接口、trace 回放和本地调试能力。
-- 为核心决策路径建立 139 项单元 / API 回归测试，覆盖正常路径、边界值、错误配置、对抗输入、动态 Agent 注册、模型超时降级、跨商品事实隔离、平台时间戳漂移重放与聚合去重、真人化回复、聊天事件幂等、Inbox 超窗搜索与 late failure、SSE/API 鉴权、人工接管、Outbox/API 请求并发 claim、续租 fencing、失败恢复、租约回收、跨进程存储竞争、规则护栏、交付决策和 HTTP 失败路径。
+- 为核心决策路径建立 156 项单元 / API 回归测试，覆盖长对话裁剪后召回、会话隔离、买家记忆越权、买家错误事实与当前商品资料冲突、模型擅改报价、重复低价守价、人工报价续接与邮费排除、跨商品事实隔离、平台时间戳漂移重放与聚合去重、SSE/API 鉴权、人工接管、并发 claim、失败恢复、规则护栏和 HTTP 失败路径。
 - 将真实闲鱼挂机链路与本地 Mock 演示链路统一到同一套 Agent 决策核心，降低调试和演示对平台 Cookie 的依赖。
 - 基于黄金交易场景构建离线 Agent eval gate，检查 intent、routed agent、guardrails、RAG grounding、price decision 和 memory consistency，避免只用最终自然语言回复判断质量。
 

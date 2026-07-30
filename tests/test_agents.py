@@ -69,6 +69,47 @@ def test_bargain_expert_never_raises_committed_price():
     assert decision["action"] == "ACCEPT"
     assert decision["price"] == 4050.0
 
+
+def test_bargain_expert_holds_when_buyer_repeats_same_lowball():
+    expert = BargainExpert(original_price=4299.0, min_price=3800.0)
+
+    decision = expert.calculate_next_price(
+        buyer_offer=3000.0,
+        last_committed_price=4149.0,
+        bargain_count=1,
+        buyer_highest_offer=3000.0,
+    )
+
+    assert decision["action"] == "REFUSE_AND_HOLD"
+    assert decision["price"] == 4149.0
+
+
+def test_bargain_expert_accepts_serious_offer_near_prior_quote():
+    expert = BargainExpert(original_price=4299.0, min_price=3800.0)
+
+    decision = expert.calculate_next_price(
+        buyer_offer=4100.0,
+        last_committed_price=4149.0,
+        bargain_count=1,
+        buyer_highest_offer=3000.0,
+    )
+
+    assert decision["action"] == "ACCEPT"
+    assert decision["price"] == 4100.0
+
+
+def test_bargain_expert_does_not_self_discount_on_repeated_generic_request():
+    expert = BargainExpert(original_price=4299.0, min_price=3800.0)
+
+    decision = expert.calculate_next_price(
+        buyer_offer=None,
+        last_committed_price=4224.0,
+        bargain_count=1,
+    )
+
+    assert decision["action"] == "REFUSE_AND_HOLD"
+    assert decision["price"] == 4224.0
+
 def test_faq_expert_rag():
     """测试 FAQ 知识库对不同关键词的 RAG 参数精准匹配"""
     product_info = {
@@ -174,6 +215,38 @@ def test_price_router_detects_number_offer_with_action_later():
     assert intent == "price"
 
 
+def test_router_detects_unitless_follow_up_offer_from_price_history():
+    router = IntentRouter(classify_agent=None)
+
+    intent = router.detect(
+        "3000 真不能给我吗",
+        item_desc="",
+        context="assistant: 4149 元可以的话我给你留",
+    )
+
+    assert intent == "price"
+    assert router.last_trace["source"] == "context_rule"
+
+
+def test_router_does_not_treat_storage_number_as_follow_up_offer():
+    class DefaultClassifier:
+        last_trace = {}
+
+        @staticmethod
+        def generate(**kwargs):
+            return "tech"
+
+    router = IntentRouter(classify_agent=DefaultClassifier())
+
+    intent = router.detect(
+        "128 不能用吗",
+        item_desc="",
+        context="assistant: 4149 元可以的话我给你留",
+    )
+
+    assert intent == "tech"
+
+
 def test_price_commitment_memory_is_monotonic(tmp_path):
     """价格记忆应保守更新：我方最低承诺取更低值，买家最高出价取更高值。"""
     db_path = tmp_path / "chat_history.db"
@@ -205,6 +278,46 @@ def test_price_commitment_memory_is_monotonic(tmp_path):
 
     assert lowest_committed == 4050
     assert buyer_highest == 4000
+
+
+def test_manual_seller_quote_updates_structured_commitment(tmp_path):
+    manager = ChatContextManager(db_path=str(tmp_path / "chat_history.db"))
+
+    manager.add_message_by_chat(
+        "chat_manual_quote",
+        "seller",
+        "item_1",
+        "assistant",
+        "3000 不行，4100 元可以的话我改价",
+    )
+    manager.add_message_by_chat(
+        "chat_manual_quote",
+        "seller",
+        "item_1",
+        "assistant",
+        "最低 4200 元",
+    )
+
+    lowest_committed, buyer_highest = manager.get_price_commitments("chat_manual_quote")
+    memories = manager.get_long_term_memories("chat_manual_quote")
+    assert lowest_committed == 4100
+    assert buyer_highest is None
+    assert manager.get_bargain_count_by_chat("chat_manual_quote") == 0
+    assert any(memory.category == "seller_commitment" for memory in memories)
+
+
+def test_shipping_fee_is_not_treated_as_manual_item_price(tmp_path):
+    manager = ChatContextManager(db_path=str(tmp_path / "chat_history.db"))
+
+    manager.add_message_by_chat(
+        "chat_shipping_fee",
+        "seller",
+        "item_1",
+        "assistant",
+        "可以发顺丰，邮费 10 元我出",
+    )
+
+    assert manager.get_price_commitments("chat_shipping_fee") == (None, None)
 
 
 def test_append_turn_atomically_updates_memory_snapshot(tmp_path):
@@ -323,6 +436,78 @@ def test_append_turn_trims_history_by_chat(tmp_path):
     assert len(snapshot.messages) == 3
     assert snapshot.messages[0]["content"] == "消息 1"
     assert snapshot.messages[-1]["content"] == "消息 3"
+
+
+def test_long_term_memory_survives_recent_history_trimming(tmp_path):
+    manager = ChatContextManager(max_history=4, db_path=str(tmp_path / "chat_history.db"))
+    manager.append_turn(
+        "chat_memory",
+        "buyer",
+        "item_1",
+        "记住我周六才能收货，要发顺丰",
+        "seller",
+        assistant_text="好，我看到了",
+        intent="default",
+    )
+    for index in range(40):
+        manager.append_turn(
+            "chat_memory",
+            "buyer",
+            "item_1",
+            f"普通消息 {index}",
+            "seller",
+            assistant_text="收到",
+            intent="default",
+        )
+
+    snapshot = manager.get_memory_snapshot("chat_memory")
+    prompt, recalled = manager.build_memory_prompt("chat_memory", "还是按之前的收货安排")
+
+    assert all("周六" not in message["content"] for message in snapshot.messages)
+    assert any(memory["content"] == "记住我周六才能收货，要发顺丰" for memory in snapshot.long_term_memories)
+    assert [memory.category for memory in recalled] == ["explicit_instruction"]
+    assert "买家明确要求" in prompt
+    assert "记住我周六才能收货，要发顺丰" in prompt
+
+
+def test_long_term_memory_is_isolated_by_chat(tmp_path):
+    manager = ChatContextManager(db_path=str(tmp_path / "chat_history.db"))
+    manager.append_turn(
+        "chat_a",
+        "buyer_a",
+        "item_1",
+        "记住我只要黑色版本",
+        "seller",
+        intent="default",
+    )
+
+    prompt, recalled = manager.build_memory_prompt("chat_b", "还是按之前说的来")
+
+    assert prompt == ""
+    assert recalled == []
+
+
+def test_recent_context_uses_latest_bounded_window(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONTEXT_RECENT_MESSAGES", "4")
+    manager = ChatContextManager(max_history=20, db_path=str(tmp_path / "chat_history.db"))
+    for index in range(6):
+        manager.append_turn(
+            "chat_recent",
+            "buyer",
+            "item_1",
+            f"消息 {index}",
+            "seller",
+            intent="default",
+        )
+
+    context = manager.get_context_by_chat("chat_recent")
+
+    assert [message["content"] for message in context] == [
+        "消息 2",
+        "消息 3",
+        "消息 4",
+        "消息 5",
+    ]
 
 
 def test_agnes_provider_is_default(monkeypatch):
