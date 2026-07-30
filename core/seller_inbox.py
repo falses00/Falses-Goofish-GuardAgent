@@ -24,6 +24,17 @@ class SellerInbox:
         self.outbox = outbox
         self.takeovers = takeovers
 
+    def change_token(self) -> str:
+        """Compact token used to avoid rebuilding the whole inbox every second."""
+        raw = "|".join(
+            (
+                self.events.change_token(),
+                self.outbox.change_token(),
+                self.takeovers.change_token(),
+            )
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+
     def snapshot(
         self,
         limit: int = 100,
@@ -33,32 +44,25 @@ class SellerInbox:
         safe_limit = min(200, max(1, int(limit)))
         events = self.events.list_recent(limit=5000)
         outbox_records = self.outbox.list_recent(limit=2000)
+        normalized_query = " ".join((query or "").lower().split())
         active_takeovers = {
             record.chat_id: record
             for record in self.takeovers.list(active_only=True, limit=500)
         }
 
-        event_groups: "OrderedDict[str, list[ChatEvent]]" = OrderedDict()
-        for event in events:
-            event_groups.setdefault(event.chat_id, []).append(event)
-        outbox_groups: "OrderedDict[str, list[ReplyOutboxRecord]]" = OrderedDict()
-        for record in outbox_records:
-            outbox_groups.setdefault(record.chat_id, []).append(record)
-
-        conversations = [
-            self._event_summary(chat_events, active_takeovers.get(chat_id))
-            for chat_id, chat_events in event_groups.items()
-        ]
-        conversations.extend(
-            self._legacy_summary(chat_records, active_takeovers.get(chat_id))
-            for chat_id, chat_records in outbox_groups.items()
-            if chat_id not in event_groups
-        )
-        conversations.sort(key=lambda item: item.get("last_activity_at") or "", reverse=True)
-
+        conversations = self._conversation_summaries(events, outbox_records, active_takeovers)
         all_counts = self._counts(conversations)
-        normalized_query = " ".join((query or "").lower().split())
+        snapshot_version = self._version(events, outbox_records, active_takeovers.values())
         if normalized_query:
+            searched_events = self.events.search_conversations(normalized_query, max_chats=safe_limit)
+            searched_outbox = self.outbox.search_conversations(normalized_query, max_chats=safe_limit)
+            events = sorted({event.id: event for event in [*events, *searched_events]}.values(), key=lambda event: event.id, reverse=True)
+            outbox_records = sorted(
+                {record.id: record for record in [*outbox_records, *searched_outbox]}.values(),
+                key=lambda record: record.id,
+                reverse=True,
+            )
+            conversations = self._conversation_summaries(events, outbox_records, active_takeovers)
             conversations = [
                 conversation
                 for conversation in conversations
@@ -69,10 +73,34 @@ class SellerInbox:
 
         return {
             "generated_at": datetime.now().astimezone().isoformat(),
-            "version": self._version(events, outbox_records, active_takeovers.values()),
+            "version": snapshot_version,
             "counts": all_counts,
             "items": conversations[:safe_limit],
         }
+
+    @staticmethod
+    def _conversation_summaries(
+        events: list[ChatEvent],
+        outbox_records: list[ReplyOutboxRecord],
+        active_takeovers: Dict[str, Any],
+    ) -> list[Dict[str, Any]]:
+        event_groups: "OrderedDict[str, list[ChatEvent]]" = OrderedDict()
+        for event in events:
+            event_groups.setdefault(event.chat_id, []).append(event)
+        outbox_groups: "OrderedDict[str, list[ReplyOutboxRecord]]" = OrderedDict()
+        for record in outbox_records:
+            outbox_groups.setdefault(record.chat_id, []).append(record)
+        conversations = [
+            SellerInbox._event_summary(chat_events, active_takeovers.get(chat_id))
+            for chat_id, chat_events in event_groups.items()
+        ]
+        conversations.extend(
+            SellerInbox._legacy_summary(chat_records, active_takeovers.get(chat_id))
+            for chat_id, chat_records in outbox_groups.items()
+            if chat_id not in event_groups
+        )
+        conversations.sort(key=lambda item: item.get("last_activity_at") or "", reverse=True)
+        return conversations
 
     def conversation(self, chat_id: str, limit: int = 200) -> Optional[Dict[str, Any]]:
         events = list(reversed(self.events.list_recent(limit=limit, chat_id=chat_id)))
@@ -196,6 +224,7 @@ class SellerInbox:
 
     @staticmethod
     def _event_message(event: ChatEvent) -> Dict[str, Any]:
+        delivery_status = "received" if event.role == "buyer" and event.status == "processed" else event.status
         return {
             "id": str(event.id),
             "source_message_id": event.source_message_id,
@@ -203,7 +232,7 @@ class SellerInbox:
             "sender_name": event.sender_name,
             "content": event.content,
             "timestamp": event.platform_created_at or event.created_at,
-            "delivery_status": event.status,
+            "delivery_status": delivery_status,
             "delivery_reason": event.metadata.get("delivery_reason"),
             "intent": event.intent,
         }

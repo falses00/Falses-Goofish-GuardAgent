@@ -505,6 +505,9 @@
     }
     state.inboxCounts = snapshot.counts || { total: 0, attention: 0, takeover: 0, failed: 0, pending: 0 };
     state.inboxVersion = snapshot.version || "";
+    elements.overviewUpdatedAt.textContent = snapshot.generated_at
+      ? `会话更新于 ${formatDateTime(snapshot.generated_at)}`
+      : "会话快照时间未知";
     elements.inboxAttentionCount.textContent = String(numberOrZero(state.inboxCounts.attention));
     elements.inboxTotalCount.textContent = String(numberOrZero(state.inboxCounts.total));
     elements.sidebarInboxCount.textContent = state.inboxCounts.attention

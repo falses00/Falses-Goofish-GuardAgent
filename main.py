@@ -472,13 +472,14 @@ class XianyuLive:
         send_user_name="买家",
         aggregation_count=1,
         source_message_id=None,
+        source_message_ids=None,
         record_inbound=True,
     ):
         source_message_id = source_message_id or ReplyOutbox.build_source_message_id(
             chat_id, item_id, send_user_id, send_message
         )
         if record_inbound:
-            self.chat_events.record_inbound(
+            inbound_event, _ = self.chat_events.record_inbound_once(
                 chat_id,
                 item_id,
                 send_user_id,
@@ -486,9 +487,19 @@ class XianyuLive:
                 send_message,
                 source_message_id,
             )
+            source_message_id = inbound_event.source_message_id or source_message_id
+            if inbound_event.outbox_dedupe_key:
+                await self._resume_linked_outbox(websocket, inbound_event.outbox_dedupe_key)
+                return
+
+        raw_source_message_ids = list(dict.fromkeys(source_message_ids or [source_message_id]))
+        linked_outbox_key = self.chat_events.linked_outbox_key(raw_source_message_ids)
+        if linked_outbox_key:
+            await self._resume_linked_outbox(websocket, linked_outbox_key)
+            return
         dedupe_key = ReplyOutbox.build_dedupe_key(chat_id, item_id, send_user_id, source_message_id)
         if self.is_manual_mode(chat_id):
-            self._suppress_for_manual_takeover(
+            takeover_record = self._suppress_for_manual_takeover(
                 chat_id,
                 send_user_id,
                 item_id,
@@ -496,10 +507,12 @@ class XianyuLive:
                 source_message_id,
                 dedupe_key,
             )
+            self.chat_events.link_inbound_to_outbox(raw_source_message_ids, takeover_record.dedupe_key)
             return
 
         existing_record = self.reply_outbox.get(dedupe_key)
         if existing_record:
+            self.chat_events.link_inbound_to_outbox(raw_source_message_ids, existing_record.dedupe_key)
             self._sync_outbox_event(existing_record)
             if existing_record.status in {"sent", "skipped"}:
                 self._commit_outbox_memory(existing_record)
@@ -549,7 +562,7 @@ class XianyuLive:
 
         # A console operator may take over while the model is still generating.
         if self.is_manual_mode(chat_id):
-            self._suppress_for_manual_takeover(
+            takeover_record = self._suppress_for_manual_takeover(
                 chat_id,
                 send_user_id,
                 item_id,
@@ -557,6 +570,7 @@ class XianyuLive:
                 source_message_id,
                 dedupe_key,
             )
+            self.chat_events.link_inbound_to_outbox(raw_source_message_ids, takeover_record.dedupe_key)
             return
 
         if aggregation_count > 1:
@@ -576,6 +590,7 @@ class XianyuLive:
                 intent=bot_intent,
             )
             no_reply_record = self.reply_outbox.mark_skipped(no_reply_record.dedupe_key, "no_reply")
+            self.chat_events.link_inbound_to_outbox(raw_source_message_ids, no_reply_record.dedupe_key)
             self._sync_outbox_event(no_reply_record)
             self._commit_outbox_memory(no_reply_record)
             return
@@ -591,8 +606,29 @@ class XianyuLive:
             user_text=send_message,
             intent=bot_intent,
         )
+        self.chat_events.link_inbound_to_outbox(raw_source_message_ids, outbox_record.dedupe_key)
         self._sync_outbox_event(outbox_record)
         await self._deliver_outbox_record(websocket, outbox_record)
+
+    async def _resume_linked_outbox(self, websocket, dedupe_key):
+        record = self.reply_outbox.get(dedupe_key)
+        if not record:
+            logger.warning(f"聊天事实关联的 Outbox 不存在，跳过重复平台事件: dedupe_key={dedupe_key}")
+            return False
+        self._sync_outbox_event(record)
+        if record.status in {"sent", "skipped"}:
+            self._commit_outbox_memory(record)
+            logger.info(
+                f"检测到已关联的重复平台事件，跳过 Agent 决策: "
+                f"chat_id={record.chat_id}, outbox_status={record.status}"
+            )
+            return True
+        logger.info(
+            f"检测到未完成的关联回复，恢复原 Outbox 发送: "
+            f"chat_id={record.chat_id}, outbox_status={record.status}"
+        )
+        await self._deliver_outbox_record(websocket, record)
+        return True
 
     def _sync_outbox_event(self, record):
         try:
@@ -653,7 +689,7 @@ class XianyuLive:
                 f"会话 {chat_id} 已人工接管，终止自动回复: "
                 f"item_id={item_id}, outbox_status={existing_record.status}"
             )
-            return
+            return existing_record
 
         record = self.reply_outbox.enqueue(
             chat_id=chat_id,
@@ -670,6 +706,7 @@ class XianyuLive:
         self._sync_outbox_event(record)
         self._commit_outbox_memory(record)
         logger.info(f"会话 {chat_id} 处于人工接管模式，已记录消息并禁止自动回复")
+        return record
 
     async def _deliver_outbox_record(self, websocket, outbox_record):
         if self.is_manual_mode(outbox_record.chat_id):
@@ -749,6 +786,13 @@ class XianyuLive:
             batch = self.message_aggregator.pop(key)
             if not batch:
                 return
+            batch_source_message_id = batch.durable_source_message_id() or ReplyOutbox.build_source_message_id(
+                batch.chat_id,
+                batch.item_id,
+                batch.user_id,
+                batch.combined_text(),
+                event_time_ms=batch.last_seen_ms,
+            )
             await self._process_buyer_message(
                 websocket,
                 batch.chat_id,
@@ -757,13 +801,8 @@ class XianyuLive:
                 batch.combined_text(),
                 send_user_name=send_user_name,
                 aggregation_count=batch.count,
-                source_message_id=ReplyOutbox.build_source_message_id(
-                    batch.chat_id,
-                    batch.item_id,
-                    batch.user_id,
-                    batch.combined_text(),
-                    event_time_ms=batch.last_seen_ms,
-                ),
+                source_message_id=batch_source_message_id,
+                source_message_ids=batch.source_message_ids,
                 record_inbound=False,
             )
         except asyncio.CancelledError:
@@ -782,6 +821,7 @@ class XianyuLive:
         send_message,
         send_user_name,
         create_time,
+        source_message_id,
     ):
         if not self.message_aggregation_enabled:
             await self._process_buyer_message(
@@ -791,24 +831,26 @@ class XianyuLive:
                 item_id,
                 send_message,
                 send_user_name=send_user_name,
-                source_message_id=ReplyOutbox.build_source_message_id(
-                    chat_id,
-                    item_id,
-                    send_user_id,
-                    send_message,
-                    event_time_ms=create_time,
-                ),
+                source_message_id=source_message_id,
+                source_message_ids=[source_message_id],
                 record_inbound=False,
             )
             return
 
-        key, should_flush = self.message_aggregator.append(
+        key, should_flush, appended = self.message_aggregator.append_once(
             chat_id=chat_id,
             item_id=item_id,
             user_id=send_user_id,
             text=send_message,
             now_ms=create_time,
+            source_message_id=source_message_id,
         )
+        if not appended:
+            logger.info(
+                f"聚合窗口忽略重复平台消息: chat_id={chat_id}, "
+                f"item_id={item_id}, source_message_id={source_message_id}"
+            )
+            return
         existing_task = self.message_flush_tasks.pop(key, None)
         if existing_task:
             existing_task.cancel()
@@ -949,7 +991,7 @@ class XianyuLive:
                     return
 
                 # 记录卖家人工回复
-                self.chat_events.record_seller(
+                _, seller_event_created = self.chat_events.record_seller_once(
                     chat_id,
                     item_id,
                     self.myid,
@@ -957,6 +999,12 @@ class XianyuLive:
                     source_message_id,
                     event_time_ms=create_time,
                 )
+                if not seller_event_created:
+                    logger.info(
+                        f"忽略重复卖家平台消息: chat_id={chat_id}, "
+                        f"source_message_id={source_message_id}"
+                    )
+                    return
                 self.context_manager.add_message_by_chat(chat_id, self.myid, item_id, "assistant", send_message)
                 logger.info(f"卖家人工回复 (会话: {chat_id}, 商品: {item_id}): {send_message}")
                 return
@@ -973,7 +1021,7 @@ class XianyuLive:
                 return
 
             # Persist the platform event before aggregation or Agent processing.
-            self.chat_events.record_inbound(
+            inbound_event, inbound_event_created = self.chat_events.record_inbound_once(
                 chat_id,
                 item_id,
                 send_user_id,
@@ -982,6 +1030,11 @@ class XianyuLive:
                 source_message_id,
                 event_time_ms=create_time,
             )
+            if not inbound_event_created and inbound_event.outbox_dedupe_key:
+                await self._resume_linked_outbox(websocket, inbound_event.outbox_dedupe_key)
+                return
+            if not inbound_event_created and inbound_event.source_message_id:
+                source_message_id = inbound_event.source_message_id
 
             # 如果当前会话处于人工接管模式，不进行自动回复
             if self.is_manual_mode(chat_id):
@@ -1005,6 +1058,7 @@ class XianyuLive:
                 send_message,
                 send_user_name,
                 create_time,
+                source_message_id,
             )
 
         except Exception as e:

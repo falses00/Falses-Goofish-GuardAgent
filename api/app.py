@@ -399,12 +399,13 @@ def create_app(
         _: None = Depends(require_access),
     ) -> StreamingResponse:
         async def event_stream():
-            last_version = None
+            last_change_token = None
             heartbeat_ticks = 0
             while not await request.is_disconnected():
-                snapshot = await asyncio.to_thread(app.state.seller_inbox.snapshot, 200)
-                if snapshot["version"] != last_version:
-                    last_version = snapshot["version"]
+                change_token = await asyncio.to_thread(app.state.seller_inbox.change_token)
+                if change_token != last_change_token:
+                    snapshot = await asyncio.to_thread(app.state.seller_inbox.snapshot, 200)
+                    last_change_token = change_token
                     payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
                     yield f"event: snapshot\ndata: {payload}\n\n"
                     heartbeat_ticks = 0

@@ -96,6 +96,7 @@ def test_live_dry_run_records_once_without_network_send(tmp_path):
     event_id = source_id()
 
     process(live, websocket, event_id=event_id)
+    bot.generate_reply = lambda *args, **kwargs: pytest.fail("duplicate event must not call the agent")
     process(live, websocket, event_id=event_id)
 
     dedupe_key = ReplyOutbox.build_dedupe_key("chat_1", "item_1", "buyer_1", event_id)
@@ -110,6 +111,21 @@ def test_live_dry_run_records_once_without_network_send(tmp_path):
     assert [event.role for event in chat_events] == ["buyer", "assistant"]
     assert chat_events[-1].status == "simulated"
     assert websocket.payloads == []
+
+
+def test_live_timestamp_drift_replay_reuses_canonical_outbox(tmp_path):
+    live, bot, outbox = build_live(tmp_path, dry_run=True)
+    websocket = RecordingWebSocket()
+
+    process(live, websocket, event_id="source_ts_1")
+    bot.generate_reply = lambda *args, **kwargs: pytest.fail("timestamp drift must not call the agent")
+    process(live, websocket, event_id="source_ts_2")
+
+    records = outbox.list_recent(chat_id="chat_1")
+    assert len(records) == 1
+    assert records[0].source_message_id == "source_ts_1"
+    assert records[0].status == "skipped"
+    assert records[0].attempt_count == 1
 
 
 def test_live_price_memory_commits_after_takeover_gate(tmp_path):
@@ -137,6 +153,7 @@ def test_live_retry_reuses_failed_reply_without_duplicate_memory(tmp_path):
     first_snapshot = bot.db.get_memory_snapshot("chat_1")
 
     websocket = RecordingWebSocket()
+    bot.generate_reply = lambda *args, **kwargs: pytest.fail("failed replay must reuse the linked reply")
     process(live, websocket, event_id=event_id)
 
     sent_record = outbox.get(dedupe_key)

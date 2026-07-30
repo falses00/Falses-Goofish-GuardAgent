@@ -45,3 +45,25 @@ def test_message_aggregator_forces_flush_at_max_messages():
     assert should_flush_second is True
     batch = aggregator.pop(key)
     assert batch.count == 2
+
+
+def test_message_aggregator_deduplicates_platform_replays_and_keeps_stable_batch_id():
+    aggregator = MessageAggregator(debounce_seconds=1.0)
+
+    key, _, first_appended = aggregator.append_once(
+        "chat_1", "item_1", "buyer_1", "还在吗", 1000, "source_1"
+    )
+    _, _, duplicate_appended = aggregator.append_once(
+        "chat_1", "item_1", "buyer_1", "还在吗", 1800, "source_1"
+    )
+    _, _, second_appended = aggregator.append_once(
+        "chat_1", "item_1", "buyer_1", "最低多少", 1900, "source_2"
+    )
+
+    batch = aggregator.pop(key)
+    assert first_appended is True
+    assert duplicate_appended is False
+    assert second_appended is True
+    assert batch.count == 2
+    assert batch.source_message_ids == ["source_1", "source_2"]
+    assert batch.durable_source_message_id() == "batch:a7acfe658fdb363e2dcbcb58"

@@ -432,8 +432,8 @@ def test_operator_console_and_static_assets_are_served_with_security_headers(tmp
     assert 'id="inboxList"' in page.text
     assert 'id="messageTimeline"' in page.text
     assert 'id="inboxContextContent"' in page.text
-    assert "/static/styles.css?v=20260729.1" in page.text
-    assert "/static/app.js?v=20260729.1" in page.text
+    assert "/static/styles.css?v=20260731.1" in page.text
+    assert "/static/app.js?v=20260731.1" in page.text
     assert stylesheet.status_code == 200
     assert page.headers["x-content-type-options"] == "nosniff"
     assert "default-src 'self'" in page.headers["content-security-policy"]

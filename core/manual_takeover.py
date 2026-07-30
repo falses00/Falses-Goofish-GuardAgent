@@ -348,6 +348,20 @@ class ManualTakeoverStore:
             row = conn.execute(f"SELECT COUNT(*) FROM manual_takeovers {where}").fetchone()
         return int(row[0])
 
+    def change_token(self) -> str:
+        """Return a compact read-only token; snapshot persists due expirations."""
+        now = time.time()
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*), COALESCE(MAX(updated_at), 0), COALESCE(MIN(expires_at), 0)
+                FROM manual_takeovers
+                WHERE active = 1 AND (expires_at IS NULL OR expires_at > ?)
+                """,
+                (now,),
+            ).fetchone()
+        return f"{row[0]}:{row[1]}:{row[2]}"
+
     def list_events(self, chat_id: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
         bounded_limit = max(1, min(int(limit), 200))
         params: List[Any] = []

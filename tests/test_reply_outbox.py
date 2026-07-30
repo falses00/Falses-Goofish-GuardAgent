@@ -159,6 +159,19 @@ def test_reply_outbox_round_trips_memory_commit_payload(tmp_path):
     assert reopened.trace == {"price_decision": {"calculated_price": 99}}
 
 
+def test_global_recent_outbox_prioritizes_late_failure_update(tmp_path):
+    outbox = ReplyOutbox(db_path=str(tmp_path / "reply_outbox.db"))
+    old_record = outbox.enqueue("chat_old", "item_1", "buyer_1", "source_1", "旧回复")
+    outbox.enqueue("chat_new", "item_2", "buyer_2", "source_2", "新回复")
+
+    outbox.claim_for_send(old_record.dedupe_key)
+    outbox.mark_failed(old_record.dedupe_key, "late failure")
+
+    latest = outbox.list_recent(limit=1)[0]
+    assert latest.chat_id == "chat_old"
+    assert latest.status == "failed"
+
+
 def test_reply_outbox_enables_wal_and_busy_timeout(tmp_path, monkeypatch):
     monkeypatch.setenv("SQLITE_BUSY_TIMEOUT_MS", "4321")
     outbox = ReplyOutbox(db_path=str(tmp_path / "reply_outbox.db"))

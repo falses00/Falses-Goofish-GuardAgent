@@ -305,6 +305,17 @@ class ReplyOutbox:
         finally:
             conn.close()
 
+    def change_token(self) -> str:
+        """Cheap change detector for realtime subscribers."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*), COALESCE(MAX(id), 0), COALESCE(MAX(updated_at), '') FROM reply_outbox"
+            ).fetchone()
+            return f"{row[0]}:{row[1]}:{row[2]}"
+        finally:
+            conn.close()
+
     def list_recent(self, limit: int = 500, chat_id: Optional[str] = None) -> list[ReplyOutboxRecord]:
         """Return durable reply events newest first for the operator inbox."""
         safe_limit = min(2000, max(1, int(limit)))
@@ -313,6 +324,7 @@ class ReplyOutbox:
         try:
             where = "WHERE chat_id = ?" if chat_id else ""
             params = [chat_id, safe_limit] if chat_id else [safe_limit]
+            order_by = "id DESC" if chat_id else "updated_at DESC, id DESC"
             cursor.execute(
                 f"""
                 SELECT id, dedupe_key, chat_id, item_id, user_id, source_message_id,
@@ -320,12 +332,70 @@ class ReplyOutbox:
                        last_error, created_at, updated_at, sent_at
                 FROM reply_outbox
                 {where}
-                ORDER BY id DESC
+                ORDER BY {order_by}
                 LIMIT ?
                 """,
                 params,
             )
             return [self._record_from_row(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def search_conversations(
+        self,
+        query: str,
+        max_chats: int = 200,
+        per_chat: int = 200,
+    ) -> list[ReplyOutboxRecord]:
+        """Search all legacy Outbox history without unbounding normal snapshots."""
+        normalized = " ".join(str(query or "").lower().split())
+        if not normalized:
+            return []
+        safe_chats = min(200, max(1, int(max_chats)))
+        safe_per_chat = min(500, max(1, int(per_chat)))
+        conn = self._connect()
+        try:
+            chat_rows = conn.execute(
+                """
+                SELECT chat_id, MAX(id) AS latest_id
+                FROM reply_outbox
+                WHERE instr(lower(chat_id), ?) > 0
+                   OR instr(lower(item_id), ?) > 0
+                   OR instr(lower(user_id), ?) > 0
+                   OR instr(lower(user_text), ?) > 0
+                   OR instr(lower(reply_text), ?) > 0
+                   OR instr(lower(COALESCE(intent, '')), ?) > 0
+                   OR instr(lower(trace_json), ?) > 0
+                GROUP BY chat_id
+                ORDER BY latest_id DESC
+                LIMIT ?
+                """,
+                [normalized] * 7 + [safe_chats],
+            ).fetchall()
+            chat_ids = [row[0] for row in chat_rows]
+            if not chat_ids:
+                return []
+            placeholders = ", ".join("?" for _ in chat_ids)
+            rows = conn.execute(
+                f"""
+                WITH ranked AS (
+                    SELECT id, dedupe_key, chat_id, item_id, user_id, source_message_id,
+                           reply_text, user_text, intent, trace_json, status, attempt_count,
+                           last_error, created_at, updated_at, sent_at,
+                           ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY id DESC) AS row_number
+                    FROM reply_outbox
+                    WHERE chat_id IN ({placeholders})
+                )
+                SELECT id, dedupe_key, chat_id, item_id, user_id, source_message_id,
+                       reply_text, user_text, intent, trace_json, status, attempt_count,
+                       last_error, created_at, updated_at, sent_at
+                FROM ranked
+                WHERE row_number <= ?
+                ORDER BY id DESC
+                """,
+                [*chat_ids, safe_per_chat],
+            ).fetchall()
+            return [self._record_from_row(row) for row in rows]
         finally:
             conn.close()
 

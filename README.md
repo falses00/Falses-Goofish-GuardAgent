@@ -107,7 +107,9 @@ Worker 在收到平台聊天消息后先写入 `core/chat_event_store.py` 的独
 - 左侧会话队列按真实活动时间显示 `人工接管 / 发送失败 / 等待处理 / 需要复核 / 已处理`，支持买家、消息、商品和会话搜索。
 - 中间时间线区分买家原文、卖家人工消息和 Agent 回复，并展示 `pending / sending / sent / failed / simulated / cancelled` 等真实交付状态。
 - 右侧上下文展示商品、买家、路由 Agent、价格决策、护栏、降级和失败原因。
-- 浏览器通过同源、Bearer 鉴权的 SSE 接收增量快照；断线时明确显示“轮询恢复”，每 3 秒刷新并周期性重连。
+- 平台原始消息是不可变事实；每个买家源消息都会持久关联到处理它的 Outbox，断线重放只恢复原发送，不重新调用 Agent，也不会把已处理会话重新标成待处理。
+- 浏览器通过同源、Bearer 鉴权的 SSE 接收增量快照；服务端每秒只读取三个 SQLite 轻量 change token，变化后才聚合完整快照。断线时明确显示“轮询恢复”，每 3 秒刷新并周期性重连。
+- 常规队列保持有界读取；显式搜索会在完整 ChatEvent/legacy Outbox 历史中定向定位会话，长期运行后仍能找到窗口外买家。
 - 宽屏桌面使用三栏工作区；1120px 以下切换为“队列 / 对话 / 上下文”三个可触达面板。
 
 这里有意把“运营聊天事实”与“Agent 短期记忆”分开：`messages` 仍可按 `max_history` 裁剪以控制模型上下文，`chat_events` 则保留客服台所需的可审计时间线。网页端当前只做监控与人工接管；FastAPI 进程不持有 live Worker 的闲鱼 WebSocket，因此在实现持久化命令队列前不会提供一个看似可用、实际无法可靠发送的输入框。
@@ -157,7 +159,7 @@ curl -X POST http://127.0.0.1:8000/api/reply ^
 3000 元能出吗
 ```
 
-如果每条消息都立刻触发一次 LLM，Agent 容易答非所问、重复回复或先回答了“你好”再错过真正的报价。`core/message_aggregation.py` 会按 `chat_id + item_id + user_id` 建立聚合窗口，在短时间内把连续消息合并成一次 Agent 输入。
+如果每条消息都立刻触发一次 LLM，Agent 容易答非所问、重复回复或先回答了“你好”再错过真正的报价。`core/message_aggregation.py` 会按 `chat_id + item_id + user_id` 建立聚合窗口，在短时间内把连续消息合并成一次 Agent 输入。聚合批次按有序 `source_message_id` 集合生成稳定身份，同一平台包在窗口内重复到达不会增加消息数、延长 debounce 或触发第二次 Agent 决策。
 
 可配置项：
 
@@ -515,6 +517,7 @@ python tools/run_agent_eval.py --min-score 1.0
 | `MESSAGE_AGGREGATION_WINDOW_SECONDS` | 聚合窗口秒数，默认 `1.2` |
 | `MESSAGE_AGGREGATION_MAX_MESSAGES` | 单批最多聚合消息数，达到后立即触发 |
 | `MESSAGE_AGGREGATION_MAX_CHARS` | 单批最多字符数，达到后立即触发 |
+| `PLATFORM_REPLAY_DEDUPE_SECONDS` | 同会话、角色和正文的即时平台重放窗口，默认 3 秒；精确源 ID 仍永久幂等 |
 | `API_OFFLINE_MODE` | API 服务是否使用离线 deterministic LLM，演示 / CI 可设为 `true` |
 | `API_CHAT_DB_PATH` | API 服务使用的 SQLite 会话数据库路径 |
 | `API_ACCESS_TOKEN` | 可选 Bearer 访问令牌；设置后保护回复、记忆、Inbox/SSE、接管和 Trace 接口 |

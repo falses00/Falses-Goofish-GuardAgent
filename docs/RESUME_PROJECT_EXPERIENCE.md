@@ -16,7 +16,7 @@
 - 为业务心跳增加超时主动断链，并实现带抖动的指数重连退避；设计无密钥原子运行状态快照与 stale 检测，支持通过 CLI/守护进程判断注册、重连、心跳超时和认证失败，避免半开连接与断网请求风暴。
 - 将同步 Token/商品 API 与 Agnes SDK 调用迁移到工作线程，通过异步锁保护共享 HTTP Session 和 Agent Trace 状态，使慢模型与上游超时不再阻塞 WebSocket 心跳和消息消费循环。
 - 构建本地卖家操作台，聚合 worker 在线状态、dry-run 安全态、Agent 模拟、价格决策、规则护栏、记忆与 Trace；增加可选 Bearer 鉴权、ready/live 探针、安全响应头和桌面/移动端响应式布局，浏览器实测无横向溢出，正文与主按钮对比度分别为 17.84:1、4.63:1。
-- 建立 `doctor / status / smoke / demo / replay / golden eval` 分层验证体系和 CI 门禁，覆盖模型故障降级、跨商品事实隔离、混合规格与报价路由、价格底线、规则承诺、人工接管、Outbox 并发、API 请求回放、事件循环阻塞、状态陈旧、敏感字段污染和认证失败路径；当前 131 项 pytest、8 个场景 11 轮 golden eval 全部通过，并由 CI 持续验证 `websockets 13.1 / 15.x` 兼容性。
+- 建立 `doctor / status / smoke / demo / replay / golden eval` 分层验证体系和 CI 门禁，覆盖模型故障降级、跨商品事实隔离、混合规格与报价路由、价格底线、规则承诺、人工接管、Outbox 并发、API 请求回放、事件循环阻塞、状态陈旧、敏感字段污染和认证失败路径；当前 139 项 pytest、8 个场景 11 轮 golden eval 全部通过，并由 CI 持续验证 `websockets 13.1 / 15.x` 兼容性。
 
 **项目链接：** https://github.com/falses00/Falses-Goofish-GuardAgent
 
@@ -54,12 +54,12 @@ Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、HTML/CSS/JavaScr
 - 二次开发闲鱼 AI 客服系统，重构为 `IntentRouter -> PriceAgent / TechAgent / DefaultAgent -> Guardrails -> LLM` 的多 Agent 决策链路，实现咨询、议价、闲聊等场景的可控分发。
 - 设计可插拔 `AgentRegistry` 与统一 handler 契约，支持按意图动态注册 Agent、配置关键词/正则优先级、Prompt 热重载后保留扩展，并通过 capabilities API 暴露运行时能力，新增业务无需修改中心 Agent loop。
 - 抽象 `model_provider` 配置层，默认接入 Agnes AI 的 OpenAI-compatible Chat Completions API，同时保留 `API_KEY / MODEL_BASE_URL / MODEL_NAME` 兼容路径，降低后续模型切换成本。
-- 设计连续消息聚合模块，在 Agent loop 前按 `chat_id + item_id + user_id` 对买家短时间多条消息进行 debounce 合并，将平台事件流稳定为业务 turn，减少重复回复、半截上下文污染和无效 LLM 调用。
+- 设计连续消息聚合模块，在 Agent loop 前按 `chat_id + item_id + user_id` 对买家短时间多条消息进行 debounce 合并，并基于有序源消息 ID 构造稳定批次身份；窗口内平台重放不会增加批次、延长 debounce 或重复调用 LLM。
 - 设计商品规则中心，将允许承诺、禁止承诺、售后边界和发货条件从 Prompt 中抽离为结构化 JSON 规则；回复前注入规则上下文，回复后做禁止承诺校验，避免模型编造成功率、内部渠道、平台外交易等高风险话术。
 - 设计真人化回复风格层，将“像真实闲鱼个人卖家”从 prompt 口号落成可配置护栏；生成前注入口语化约束，生成后确定性清洗“作为 AI 客服”“感谢咨询”等机器腔表达，并将改写结果写入 Trace。
 - 设计回复执行 Outbox，在真实 WebSocket 发送前持久化回复，基于 SQLite 原子事务实现并发安全 claim 与 `pending / sending / sent / failed / skipped` 状态流转；失败恢复复用原回复、避免二次 LLM 调用和重复记忆写入，并通过超时 lease 恢复进程崩溃造成的卡单，同时明确远端无幂等键时的 ACK 重复窗口。
-- 将“Agent 短期记忆”与“运营聊天事实”解耦，设计 `ChatEventStore` 持久化买家、卖家和 Agent 事件，并以 Outbox dedupe key 原地同步交付状态；构建 `SellerInbox` 读模型聚合会话、失败、待处理、降级和接管状态，同时兼容升级前 legacy Outbox 数据。
-- 基于 FastAPI `StreamingResponse` 实现 Bearer 鉴权 SSE，事件/Outbox/接管版本变化时推送快照；前端断线后自动降级到 3 秒轮询并周期重连，令牌只通过请求头传输，不进入 URL 或持久化存储。
+- 将“Agent 短期记忆”与“运营聊天事实”解耦，设计 immutable `ChatEventStore` 持久化买家、卖家和 Agent 事件，并将每个原始买家事件关联到处理它的 Outbox；断线重放只恢复原发送，不重新决策或把已完成会话回退为 pending，同时兼容升级前 legacy Outbox 数据。
+- 基于 FastAPI `StreamingResponse` 实现 Bearer 鉴权 SSE，以三库轻量 change token 替代每连接每秒全量 Inbox 聚合，状态变化时才生成快照；常规队列有界读取，显式搜索定向覆盖完整事件历史，前端断线后降级到 3 秒轮询并周期重连。
 - 设计持久化 human-in-the-loop 控制面，以 `chat_id` 为隔离边界管理人工接管、TTL 与审计事件；API console 和 live Worker 共享 SQLite 事实源，价格 Agent 采用“无副作用生成 -> Outbox 持久化 -> 终态驱动记忆”，并通过对抗测试验证生成中接管、入队后接管、跨实例同步和 pending Outbox 取消。
 - 实现交付决策引擎，根据商品类型、订单状态和是否需要人工确认输出 `wait_for_payment / manual_review / auto_deliver` 等可审计动作，为后续自动发货执行层提供安全前置判断。
 - 设计 `BargainExpert` 确定性议价策略，将价格底线、历史承诺价、买家最高出价从 LLM Prompt 中剥离为代码级约束，避免模型被诱导突破底价或前后报价不一致。
@@ -100,7 +100,7 @@ Python、FastAPI、Agnes AI、OpenAI SDK、WebSocket、SQLite、HTML/CSS/JavaScr
 如果需要放在简历里更偏结果，可以写：
 
 - 将原项目从单一自动回复改造为 4 类 Agent 协同链路，补齐价格护栏、商品事实约束、会话记忆、服务接口、trace 回放和本地调试能力。
-- 为核心决策路径建立 131 项单元 / API 回归测试，覆盖正常路径、边界值、错误配置、对抗输入、动态 Agent 注册、模型超时降级、跨商品事实隔离、消息聚合状态机、真人化回复、聊天事件幂等、Inbox 聚合与 legacy 回退、SSE/API 鉴权、人工接管、Outbox/API 请求并发 claim、续租 fencing、失败恢复、租约回收、跨进程存储竞争、规则护栏、交付决策和 HTTP 失败路径。
+- 为核心决策路径建立 139 项单元 / API 回归测试，覆盖正常路径、边界值、错误配置、对抗输入、动态 Agent 注册、模型超时降级、跨商品事实隔离、平台时间戳漂移重放与聚合去重、真人化回复、聊天事件幂等、Inbox 超窗搜索与 late failure、SSE/API 鉴权、人工接管、Outbox/API 请求并发 claim、续租 fencing、失败恢复、租约回收、跨进程存储竞争、规则护栏、交付决策和 HTTP 失败路径。
 - 将真实闲鱼挂机链路与本地 Mock 演示链路统一到同一套 Agent 决策核心，降低调试和演示对平台 Cookie 的依赖。
 - 基于黄金交易场景构建离线 Agent eval gate，检查 intent、routed agent、guardrails、RAG grounding、price decision 和 memory consistency，避免只用最终自然语言回复判断质量。
 

@@ -145,12 +145,15 @@ flowchart LR
     G --> H["HTTP + SSE + 三栏控制台"]
 ```
 
-- `core/chat_event_store.py`：平台消息按 `source_message_id` 幂等写入；Outbox 状态按 dedupe key 更新同一个回复事件。
-- `core/seller_inbox.py`：将聊天事件、旧 Outbox 记录和人工接管聚合为会话队列与详情。
-- `api/app.py`：提供快照、单会话详情和 Bearer 鉴权 SSE；连接断开时前端轮询恢复。
+- `core/chat_event_store.py`：平台消息按 `source_message_id` 作为不可变事实只写一次；原始买家事件持久关联负责处理它的 Outbox，重放时恢复原副作用而不是重新决策。
+- `core/message_aggregation.py`：批次按有序源消息 ID 集合生成稳定身份，窗口内重复包既不增加消息数，也不重置 debounce。
+- `core/seller_inbox.py`：将聊天事件、旧 Outbox 记录和人工接管聚合为会话队列与详情；正常队列有界读取，显式搜索定向查询完整历史。
+- `api/app.py`：提供快照、单会话详情和 Bearer 鉴权 SSE；无变化时只查询轻量 change token，连接断开时前端轮询恢复。
 - `tests/test_chat_event_store.py`、`tests/test_seller_inbox.py`：验证重复事件、失败、无需回复、接管、筛选和 legacy 数据回退。
 
-面试讲法：我没有直接把 LLM memory 暴露成客服聊天记录，而是设计独立事件事实流和投影视图。这样模型上下文可以按成本裁剪，运营审计仍保留完整语义；执行状态变化更新同一事件，避免 UI 产生重复消息。
+只给 `event_key` 加唯一约束还不够：如果冲突时仍更新 `updated_at`，重复平台包会重新成为“最新买家消息”，把已经 `sent` 的会话错误投影成 `pending`；如果聚合器不按源 ID 去重，同一条消息还可能进入两次 LLM 输入。本项目把平台事实设为 immutable，并把“这条原始消息由哪个 Outbox 处理”作为持久关系保存；对平台改变时间戳但正文未变的即时重放，再使用默认 3 秒、最大 30 秒的语义窗口复用 canonical source ID。窗口可关闭，且不扩成永久正文去重，避免吞掉真实重复询问。
+
+面试讲法：我没有直接把 LLM memory 暴露成客服聊天记录，而是设计独立事件事实流和投影视图。这样模型上下文可以按成本裁剪，运营审计仍保留完整语义；执行状态变化更新同一事件，重复平台消息沿持久关联恢复原 Outbox，不会重新触发模型副作用。
 
 ## Lesson 2: 规则中心先于自动执行
 

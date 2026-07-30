@@ -1,3 +1,4 @@
+import hashlib
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -11,6 +12,7 @@ class MessageBatch:
     item_id: str
     user_id: str
     messages: List[str] = field(default_factory=list)
+    source_message_ids: List[str] = field(default_factory=list)
     first_seen_ms: int = 0
     last_seen_ms: int = 0
 
@@ -24,6 +26,13 @@ class MessageBatch:
         lines = ["用户连续发送了以下消息，请合并理解后只回复一次："]
         lines.extend(f"{index}. {message}" for index, message in enumerate(self.messages, start=1))
         return "\n".join(lines)
+
+    def durable_source_message_id(self) -> str:
+        """Stable identity for the exact ordered set of platform messages."""
+        if not self.source_message_ids:
+            return ""
+        digest = hashlib.sha256("\x1f".join(self.source_message_ids).encode("utf-8")).hexdigest()[:24]
+        return f"batch:{digest}"
 
 
 class MessageAggregator:
@@ -47,6 +56,24 @@ class MessageAggregator:
         text: str,
         now_ms: int,
     ) -> Tuple[AggregationKey, bool]:
+        key, should_flush, _ = self.append_once(
+            chat_id,
+            item_id,
+            user_id,
+            text,
+            now_ms,
+        )
+        return key, should_flush
+
+    def append_once(
+        self,
+        chat_id: str,
+        item_id: str,
+        user_id: str,
+        text: str,
+        now_ms: int,
+        source_message_id: Optional[str] = None,
+    ) -> Tuple[AggregationKey, bool, bool]:
         key = self.key_for(chat_id, item_id, user_id)
         clean_text = text.strip()
         batch = self._buffers.get(key)
@@ -60,10 +87,17 @@ class MessageAggregator:
             )
             self._buffers[key] = batch
 
+        normalized_source_id = str(source_message_id or "").strip()
+        if normalized_source_id and normalized_source_id in batch.source_message_ids:
+            should_flush = batch.count >= self.max_messages or len(batch.combined_text()) >= self.max_chars
+            return key, should_flush, False
+
         batch.messages.append(clean_text)
+        if normalized_source_id:
+            batch.source_message_ids.append(normalized_source_id)
         batch.last_seen_ms = now_ms
         should_flush = batch.count >= self.max_messages or len(batch.combined_text()) >= self.max_chars
-        return key, should_flush
+        return key, should_flush, True
 
     def pop(self, key: AggregationKey) -> Optional[MessageBatch]:
         return self._buffers.pop(key, None)

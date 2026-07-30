@@ -143,14 +143,25 @@ def test_query_finds_conversation_outside_default_result_window(tmp_path):
     events.record_inbound(
         "old_target", "target_item", "target_buyer", "唯一买家", "唯一历史消息", "source_target"
     )
-    for index in range(205):
-        events.record_inbound(
-            f"new_chat_{index}",
-            f"item_{index}",
-            f"buyer_{index}",
-            f"买家{index}",
-            f"较新的消息 {index}",
-            f"source_{index}",
+    timestamp = "2099-07-31T00:00:00+08:00"
+    rows = [
+        (
+            f"in:source_{index}", f"new_chat_{index}", f"item_{index}", f"buyer_{index}",
+            f"买家{index}", "buyer", "inbound", f"较新的消息 {index}", "received",
+            f"source_{index}", None, None, None, "{}", timestamp, timestamp,
+        )
+        for index in range(5100)
+    ]
+    with events._connection() as conn:
+        conn.executemany(
+            """
+            INSERT INTO chat_events (
+                event_key, chat_id, item_id, user_id, sender_name, role, direction,
+                content, status, source_message_id, outbox_dedupe_key, intent,
+                platform_created_at, metadata_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
         )
 
     unfiltered = inbox.snapshot(limit=200)
@@ -158,3 +169,38 @@ def test_query_finds_conversation_outside_default_result_window(tmp_path):
 
     assert all(item["chat_id"] != "old_target" for item in unfiltered["items"])
     assert [item["chat_id"] for item in searched["items"]] == ["old_target"]
+
+
+def test_duplicate_inbound_replay_does_not_reopen_handled_conversation(tmp_path):
+    inbox, events, outbox, _ = build_inbox(tmp_path)
+    record = seed_reply(events, outbox)
+    outbox.claim_for_send(record.dedupe_key)
+    sent = outbox.mark_sent(record.dedupe_key)
+    events.link_inbound_to_outbox(["source_1"], sent.dedupe_key)
+    events.sync_outbox(sent)
+
+    before = inbox.snapshot()["items"][0]
+    replayed, created = events.record_inbound_once(
+        "chat_1", "item_1", "buyer_1", "小林", "还在吗", "source_1"
+    )
+    after = inbox.snapshot()["items"][0]
+
+    assert before["state"] == "handled"
+    assert created is False
+    assert replayed.outbox_dedupe_key == sent.dedupe_key
+    assert after["state"] == "handled"
+    assert after["last_message"] == sent.reply_text
+
+
+def test_change_token_tracks_event_outbox_and_takeover_transitions(tmp_path):
+    inbox, events, outbox, takeovers = build_inbox(tmp_path)
+    initial = inbox.change_token()
+    events.record_inbound("chat_1", "item_1", "buyer_1", "小林", "还在吗", "source_1")
+    after_event = inbox.change_token()
+    record = outbox.enqueue("chat_1", "item_1", "buyer_1", "source_1", "在的")
+    after_outbox = inbox.change_token()
+    takeovers.enable("chat_1", ttl_seconds=600)
+    after_takeover = inbox.change_token()
+
+    assert len({initial, after_event, after_outbox, after_takeover}) == 4
+    assert inbox.change_token() == after_takeover
